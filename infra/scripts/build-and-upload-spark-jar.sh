@@ -28,7 +28,20 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo ""
 echo "➤ Building Spark assembly JAR (sbt assembly)..."
 cd "${SPARK_DIR}"
-sbt assembly
+
+if command -v sbt &> /dev/null; then
+  echo "  [Using host sbt]"
+  sbt assembly
+else
+  echo "  [Host sbt not found — compiling inside Docker container (hseeberger/scala-sbt)...]"
+  docker run --rm \
+    -v "${SPARK_DIR}:/build" \
+    -v "${PROJECT_ROOT}/.ivy2:/root/.ivy2" \
+    -v "${PROJECT_ROOT}/.sbt:/root/.sbt" \
+    -w /build \
+    hseeberger/scala-sbt:11.0.14.1_1.6.2_2.12.15 \
+    sbt assembly
+fi
 
 # 2. Find the built jar
 JAR_PATH="${ASSEMBLY_DIR}/${JAR_NAME}"
