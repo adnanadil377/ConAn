@@ -1,12 +1,12 @@
 import {
   CollaborationGraphData,
   CommitTypeStat,
-  ContributorPrediction,
   ContributorStat,
+  HdfsStatus,
   IngestionJob,
-  RealtimeEvent,
   RepoOverview,
   Repository,
+  SparkStatus,
 } from '../types'
 
 // Use relative /api endpoint (proxied by Vite in dev) or fallback to absolute
@@ -58,14 +58,6 @@ export async function fetchContributorStats(
   return res.json()
 }
 
-export async function fetchContributorPrediction(
-  login: string
-): Promise<ContributorPrediction[]> {
-  const res = await fetch(`${API_BASE}/contributors/${encodeURIComponent(login)}/prediction`)
-  if (!res.ok) return []
-  return res.json()
-}
-
 export async function triggerIngestion(payload: {
   repo_url: string
   access_token?: string
@@ -101,38 +93,19 @@ export async function triggerResync(owner: string, name: string): Promise<{ job_
   return res.json()
 }
 
-export function subscribeToRealtimeEvents(
-  onEvent: (event: RealtimeEvent) => void,
-  repo?: string
-): () => void {
-  const url = repo
-    ? `${API_BASE}/realtime/events?repo=${encodeURIComponent(repo)}`
-    : `${API_BASE}/realtime/events`
+export async function deleteRepository(owner: string, name: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/repos/${owner}/${name}`, { method: 'DELETE' })
+  if (!res.ok) throw new Error('Failed to delete repository')
+}
 
-  let eventSource: EventSource | null = null
-  let isClosed = false
+export async function fetchHdfsStatus(): Promise<HdfsStatus> {
+  const res = await fetch(`${API_BASE}/hdfs/status`)
+  if (!res.ok) throw new Error('Failed to fetch HDFS status')
+  return res.json()
+}
 
-  try {
-    eventSource = new EventSource(url)
-    eventSource.onmessage = (e) => {
-      try {
-        const parsed = JSON.parse(e.data)
-        onEvent(parsed)
-      } catch (err) {
-        console.error('Failed to parse SSE event data', err)
-      }
-    }
-    eventSource.onerror = () => {
-      // In dev mode or when topic has no events, keep quiet and retry automatically
-    }
-  } catch (err) {
-    console.warn('SSE subscription failed to initialize', err)
-  }
-
-  return () => {
-    isClosed = true
-    if (eventSource) {
-      eventSource.close()
-    }
-  }
+export async function fetchSparkStatus(): Promise<SparkStatus> {
+  const res = await fetch(`${API_BASE}/spark/status`)
+  if (!res.ok) throw new Error('Failed to fetch Spark status')
+  return res.json()
 }

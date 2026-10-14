@@ -7,10 +7,9 @@ import {
 import { BusFactorRiskTable } from './components/BusFactorRiskTable'
 import { CollaborationGraph } from './components/CollaborationGraph'
 import { CommitAnalyticsView } from './components/CommitAnalyticsView'
-import { ContributorRetentionView } from './components/ContributorRetentionView'
 import { HealthScorePanel } from './components/HealthScorePanel'
+import { InfrastructureMonitor } from './components/InfrastructureMonitor'
 import { IngestionModal } from './components/IngestionModal'
-import { LiveEventStream } from './components/LiveEventStream'
 import { Navbar } from './components/Navbar'
 import { OverviewCards } from './components/OverviewCards'
 import {
@@ -30,7 +29,7 @@ import type {
   Repository,
 } from './types'
 
-type ActiveTab = 'overview' | 'network' | 'commits' | 'retention' | 'stream'
+type ActiveTab = 'overview' | 'network' | 'commits' | 'infra'
 
 export const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<ActiveTab>('overview')
@@ -101,102 +100,115 @@ export const App: React.FC = () => {
     }
 
     loadRepoData()
+    setActiveTab('overview')
   }, [selectedRepo])
 
-  // 3. Load collaboration graph when tab or minWeight changes
+  // 3. Load collaboration graph lazily when switching to the network tab
   useEffect(() => {
-    if (!selectedRepo || (activeTab !== 'network' && activeTab !== 'overview')) return
+    if (activeTab !== 'network' || !selectedRepo) return
 
     const loadGraph = async () => {
       setIsGraphLoading(true)
       try {
-        const data = await fetchCollaborationGraph(
+        const g = await fetchCollaborationGraph(
           selectedRepo.owner,
           selectedRepo.name,
           minGraphWeight
         )
-        setGraphData(data)
-      } catch (err) {
-        console.error('Failed to load graph data', err)
+        setGraphData(g)
+      } catch {
+        setGraphData({ nodes: [], edges: [] })
       } finally {
         setIsGraphLoading(false)
       }
     }
 
     loadGraph()
-  }, [selectedRepo, minGraphWeight, activeTab])
+  }, [activeTab, selectedRepo, minGraphWeight])
 
-  // Handle re-sync
-  const handleResync = async () => {
-    if (!selectedRepo) return
-    setIsResyncing(true)
-    try {
-      await triggerResync(selectedRepo.owner, selectedRepo.name)
-      setTimeout(async () => {
-        const ov = await fetchRepoOverview(selectedRepo.owner, selectedRepo.name)
-        setOverview(ov)
-        setIsResyncing(false)
-      }, 3000)
-    } catch (err: any) {
-      alert(err.message || 'Re-sync trigger failed')
-      setIsResyncing(false)
-    }
+  // 4. Handle repo selection
+  const handleSelectRepo = (repo: Repository) => {
+    setSelectedRepo(repo)
   }
 
-  // Handle successful ingestion
+  // 5. Handle ingestion success
   const handleIngestionSuccess = async (owner: string, name: string) => {
     try {
       const repos = await fetchRepositories()
       setRepositories(repos)
-      const newlyAdded = repos.find((r) => r.owner === owner && r.name === name)
-      if (newlyAdded) {
-        setSelectedRepo(newlyAdded)
-      } else if (repos.length > 0) {
-        setSelectedRepo(repos[0])
-      }
-    } catch (err) {
-      console.error('Failed to reload repositories', err)
+      const newRepo = repos.find((r) => r.owner === owner && r.name === name)
+      if (newRepo) setSelectedRepo(newRepo)
+    } catch {
+      // Silently fail — user can manually refresh
     }
   }
 
+  // 6. Handle re-sync
+  const handleResync = async () => {
+    if (!selectedRepo || isResyncing) return
+    setIsResyncing(true)
+    try {
+      await triggerResync(selectedRepo.owner, selectedRepo.name)
+    } finally {
+      setTimeout(() => setIsResyncing(false), 5000)
+    }
+  }
+
+  if (isLoading && repositories.length === 0) {
+    return (
+      <div
+        style={{
+          minHeight: '100vh',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          flexDirection: 'column',
+          gap: 16,
+        }}
+      >
+        <div className="pulse-dot" style={{ width: 8, height: 8, backgroundColor: 'var(--text-muted)' }} />
+        <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>
+          Connecting to lakehouse API…
+        </span>
+      </div>
+    )
+  }
+
   return (
-    <div>
-      {/* Edge-to-Edge Navigation */}
+    <div className="app-layout">
       <Navbar
         repositories={repositories}
         selectedRepo={selectedRepo}
-        onSelectRepo={(r) => setSelectedRepo(r)}
+        onSelectRepo={handleSelectRepo}
         onOpenIngestModal={() => setIsIngestModalOpen(true)}
         onResync={handleResync}
         isResyncing={isResyncing}
         backendStatus={backendStatus}
       />
 
-      <div className="app-layout">
-        {/* Error Alert */}
+      <div className="app-content">
+        {/* Error Banner */}
         {errorMessage && (
           <div
             style={{
-              padding: '12px 16px',
-              borderRadius: 'var(--radius-sm)',
+              padding: '10px 14px',
+              borderRadius: 'var(--radius-xs)',
               background: 'var(--status-rose-bg)',
-              border: '1px solid rgba(239, 68, 68, 0.25)',
+              border: '1px solid rgba(239,68,68,0.25)',
               color: 'var(--status-rose)',
+              fontSize: '0.8rem',
               display: 'flex',
               alignItems: 'center',
-              justifyContent: 'space-between',
-              fontSize: '0.825rem',
+              gap: '8px',
             }}
           >
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <AlertCircle size={16} />
-              <span>{errorMessage}</span>
-            </div>
+            <AlertCircle size={14} />
+            <span>{errorMessage}</span>
             <button
-              className="btn btn-secondary btn-sm"
-              onClick={() => window.location.reload()}
+              onClick={() => setErrorMessage(null)}
+              style={{ marginLeft: 'auto', background: 'transparent', border: 'none', color: 'inherit', cursor: 'pointer', fontSize: '0.8rem' }}
             >
-              Retry
+              ✕
             </button>
           </div>
         )}
@@ -228,7 +240,7 @@ export const App: React.FC = () => {
                   Last synchronized:{' '}
                   {selectedRepo.synced_at
                     ? new Date(selectedRepo.synced_at).toLocaleString()
-                    : 'Realtime'}
+                    : '—'}
                 </span>
                 <span>•</span>
                 <a
@@ -242,7 +254,7 @@ export const App: React.FC = () => {
               </div>
             </div>
 
-            {/* Sub-Navigation Tabs (GitHub / Vercel style) */}
+            {/* Sub-Navigation Tabs */}
             <nav className="subnav-tabs" aria-label="Dashboard Views">
               <button
                 id="tab-overview"
@@ -266,18 +278,11 @@ export const App: React.FC = () => {
                 <span>Commit Taxonomy</span>
               </button>
               <button
-                id="tab-retention"
-                className={`subnav-tab ${activeTab === 'retention' ? 'active' : ''}`}
-                onClick={() => setActiveTab('retention')}
+                id="tab-infra"
+                className={`subnav-tab ${activeTab === 'infra' ? 'active' : ''}`}
+                onClick={() => setActiveTab('infra')}
               >
-                <span>ML Personas</span>
-              </button>
-              <button
-                id="tab-stream"
-                className={`subnav-tab ${activeTab === 'stream' ? 'active' : ''}`}
-                onClick={() => setActiveTab('stream')}
-              >
-                <span>Live Stream</span>
+                <span>Infrastructure</span>
               </button>
             </nav>
           </div>
@@ -315,17 +320,12 @@ export const App: React.FC = () => {
               />
             )}
 
-            {/* TAB 4: ML PERSONAS & RETENTION */}
-            {activeTab === 'retention' && (
-              <ContributorRetentionView
-                contributors={contributorStats}
-                totalCommits={overview.metrics.total_commits}
+            {/* TAB 4: INFRASTRUCTURE MONITOR (HDFS + Spark) */}
+            {activeTab === 'infra' && (
+              <InfrastructureMonitor
+                repoOwner={selectedRepo?.owner}
+                repoName={selectedRepo?.name}
               />
-            )}
-
-            {/* TAB 5: REALTIME STREAM */}
-            {activeTab === 'stream' && (
-              <LiveEventStream repoName={selectedRepo ? `${selectedRepo.owner}/${selectedRepo.name}` : undefined} />
             )}
           </main>
         ) : (
@@ -333,7 +333,8 @@ export const App: React.FC = () => {
             <div style={{ maxWidth: '400px', margin: '0 auto', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '12px' }}>
               <div style={{ fontSize: '1.1rem', fontWeight: 600 }}>No Tracked Repositories</div>
               <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>
-                Ingest your first repository to begin blobless historical git analysis and Lakehouse processing.
+                Ingest your first repository to begin blobless historical git analysis,
+                HDFS Parquet storage, and Spark Iceberg lakehouse processing.
               </p>
               <button
                 className="btn btn-primary"

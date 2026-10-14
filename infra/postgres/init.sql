@@ -1,5 +1,7 @@
 -- GitHub Analytics serving database schema
 -- Applied automatically by postgres container on first boot
+-- v0.3.0: Removed retention_predictions and realtime_events tables (ML removed, Kafka deferred).
+--         Updated ingestion_jobs status enum comment to include hdfs_write and spark_etl stages.
 
 -- ──────────────────────────────────────────────────────────
 -- Repositories
@@ -36,13 +38,13 @@ CREATE TABLE IF NOT EXISTS contributors (
 );
 
 -- ──────────────────────────────────────────────────────────
--- Commit stats (pre-aggregated from Spark)
+-- Commit stats (pre-aggregated from Spark / Python pipeline)
 -- ──────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS commit_stats (
     id              SERIAL PRIMARY KEY,
     repo_id         INT REFERENCES repositories(id),
     contributor_id  INT REFERENCES contributors(id),
-    period          DATE   NOT NULL,          -- truncated to month
+    period          DATE   NOT NULL,          -- truncated to month (YYYY-MM-01)
     commit_count    INT    DEFAULT 0,
     insertions      BIGINT DEFAULT 0,
     deletions       BIGINT DEFAULT 0,
@@ -57,24 +59,35 @@ CREATE TABLE IF NOT EXISTS commit_types (
     id              SERIAL PRIMARY KEY,
     repo_id         INT REFERENCES repositories(id),
     period          DATE NOT NULL,
-    commit_type     TEXT NOT NULL,   -- FEATURE | BUG_FIX | REFACTOR | DOCS | PERF | TEST | OTHER
+    commit_type     TEXT NOT NULL,   -- FEATURE | BUG_FIX | REFACTOR | DOCUMENTATION | PERFORMANCE | TEST | SECURITY | DEVOPS | OTHER
     count           INT  DEFAULT 0,
     UNIQUE (repo_id, period, commit_type)
 );
 
 -- ──────────────────────────────────────────────────────────
--- ML predictions: contributor retention
+-- Full Commit History (indexed for lazy loading & search)
 -- ──────────────────────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS retention_predictions (
-    id              SERIAL PRIMARY KEY,
-    contributor_id  INT REFERENCES contributors(id),
-    repo_id         INT REFERENCES repositories(id),
-    predicted_at    TIMESTAMPTZ DEFAULT NOW(),
-    window_days     INT  NOT NULL,              -- 30 | 60 | 90
-    probability     FLOAT NOT NULL,
-    cluster_label   TEXT,                       -- K-Means cluster
-    features        JSONB                       -- raw feature vector for explainability
+CREATE TABLE IF NOT EXISTS commits (
+    id              BIGSERIAL PRIMARY KEY,
+    repo_id         INT REFERENCES repositories(id) ON DELETE CASCADE,
+    hash            TEXT NOT NULL,
+    author_name     TEXT NOT NULL,
+    author_email    TEXT,
+    committer_date  TIMESTAMPTZ,
+    author_date     TIMESTAMPTZ,
+    subject         TEXT,
+    commit_type     TEXT DEFAULT 'OTHER',
+    insertions      INT DEFAULT 0,
+    deletions       INT DEFAULT 0,
+    files_changed   INT DEFAULT 0,
+    UNIQUE (repo_id, hash)
 );
+
+CREATE INDEX IF NOT EXISTS idx_commits_repo_date ON commits (repo_id, author_date DESC);
+CREATE INDEX IF NOT EXISTS idx_commits_author ON commits (repo_id, author_name);
+CREATE INDEX IF NOT EXISTS idx_commits_type ON commits (repo_id, commit_type);
+CREATE INDEX IF NOT EXISTS idx_commits_hash ON commits (repo_id, hash);
+
 
 -- ──────────────────────────────────────────────────────────
 -- Graph analytics: collaboration edges
@@ -85,13 +98,13 @@ CREATE TABLE IF NOT EXISTS collaboration_edges (
     dev_a           TEXT NOT NULL,
     dev_b           TEXT NOT NULL,
     weight          INT  DEFAULT 1,
-    relationship    TEXT NOT NULL,  -- same_file | reviewed_pr | same_pr
+    relationship    TEXT NOT NULL,  -- same_module | reviewed_pr | same_pr
     period          DATE,
     UNIQUE (repo_id, dev_a, dev_b, relationship, period)
 );
 
 -- ──────────────────────────────────────────────────────────
--- Project health scores (computed by Spark, served here)
+-- Project health scores (computed by the analytics pipeline)
 -- ──────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS health_scores (
     id                      SERIAL PRIMARY KEY,
@@ -122,23 +135,11 @@ CREATE TABLE IF NOT EXISTS bus_factor (
 );
 
 -- ──────────────────────────────────────────────────────────
--- Real-time events (latest from Kafka → Structured Streaming)
--- ──────────────────────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS realtime_events (
-    id              BIGSERIAL PRIMARY KEY,
-    event_type      TEXT NOT NULL,
-    repo_full_name  TEXT NOT NULL,
-    actor_login     TEXT,
-    payload         JSONB,
-    received_at     TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE INDEX ON realtime_events (repo_full_name, received_at DESC);
-CREATE INDEX ON commit_stats (repo_id, period DESC);
-CREATE INDEX ON collaboration_edges (repo_id, weight DESC);
-
--- ──────────────────────────────────────────────────────────
--- Ingestion Jobs (Asynchronous repository processing)
+-- Ingestion Jobs (asynchronous repository processing tracker)
+--
+-- status lifecycle:
+--   queued → cloning → extracting → hdfs_write → analytics → spark_etl → completed
+--   (any stage may transition to: failed)
 -- ──────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS ingestion_jobs (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -146,15 +147,19 @@ CREATE TABLE IF NOT EXISTS ingestion_jobs (
     repo_owner      TEXT,
     repo_name       TEXT,
     branch          TEXT,
-    status          TEXT NOT NULL DEFAULT 'queued', -- queued, cloning, extracting, lakehouse_write, analytics, completed, failed
+    status          TEXT NOT NULL DEFAULT 'queued',
+    -- queued | cloning | extracting | hdfs_write | analytics | spark_etl | completed | failed
     progress_pct    INT DEFAULT 0,
     current_step    TEXT DEFAULT 'Queued in pipeline',
     total_commits   INT DEFAULT 0,
     error_message   TEXT,
-    started_at      TIMESTAMPTZ DEFAULT NOW(),
+    started_at      TIMESTAMPTZ,
     completed_at    TIMESTAMPTZ,
     created_at      TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_ingestion_jobs_created ON ingestion_jobs (created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_ingestion_jobs_repo ON ingestion_jobs (repo_owner, repo_name);
+CREATE INDEX IF NOT EXISTS idx_commit_stats_period ON commit_stats (repo_id, period DESC);
+CREATE INDEX IF NOT EXISTS idx_collab_edges_weight ON collaboration_edges (repo_id, weight DESC);
+CREATE INDEX IF NOT EXISTS idx_bus_factor_repo ON bus_factor (repo_id, top_owner_pct DESC);
