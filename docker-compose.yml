@@ -11,8 +11,11 @@ x-spark-common: &spark-common
     - SPARK_WORKER_MEMORY=2G
     - HADOOP_CONF_DIR=/opt/hadoop/etc/hadoop
     - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+    # Pre-populate Ivy cache location for spark --packages (persisted via volume)
+    - SPARK_HOME=/opt/spark
   volumes:
     - ./spark:/opt/spark/work-dir
+    - spark-ivy-cache:/root/.ivy2
   depends_on:
     - spark-master
     - namenode
@@ -90,6 +93,12 @@ services:
       - hdfs-name:/data/name
     networks:
       - lakehouse
+    healthcheck:
+      test: ["CMD", "hdfs", "dfsadmin", "-fs", "hdfs://namenode:9000", "-report"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
 
   datanode:
     image: apache/hadoop:3.3.6
@@ -121,13 +130,13 @@ services:
     entrypoint: >
       /bin/sh -c "
       until hdfs dfsadmin -fs hdfs://namenode:9000 -safemode get 2>/dev/null | grep -q 'Safe mode is OFF'; do
-        echo 'Waiting for NameNode to be ready and leave safe mode...';
+        echo 'Waiting for NameNode to leave safe mode...';
         hdfs dfsadmin -fs hdfs://namenode:9000 -safemode leave 2>/dev/null || true;
-        sleep 3;
+        sleep 5;
       done;
       hdfs dfs -mkdir -p hdfs://namenode:9000/raw/git_events;
-      hdfs dfs -mkdir -p hdfs://namenode:9000/warehouse;
-      hdfs dfs -mkdir -p hdfs://namenode:9000/lakehouse;
+      hdfs dfs -mkdir -p hdfs://namenode:9000/warehouse/data;
+      hdfs dfs -mkdir -p hdfs://namenode:9000/jars;
       hdfs dfs -chmod -R 777 hdfs://namenode:9000/;
       echo 'HDFS directories created successfully.';
       "
@@ -145,11 +154,14 @@ services:
     environment:
       - HADOOP_CONF_DIR=/opt/hadoop/etc/hadoop
       - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+      - SPARK_HOME=/opt/spark
     volumes:
       - ./spark:/opt/spark/work-dir
+      - spark-ivy-cache:/root/.ivy2
     ports:
-      - "7077:7077"   # Spark master
-      - "8080:8080"   # Spark UI
+      - "7077:7077"   # Spark master RPC
+      - "8080:8080"   # Spark master Web UI
+      - "6066:6066"   # Spark REST submission API
     depends_on:
       - namenode
     networks:
@@ -161,7 +173,7 @@ services:
     ports:
       - "8081:8081"
 
-  # ── Hive Metastore (Optional profile) ──────────────────────────────────────
+  # ── Hive Metastore (Optional — launch with: docker compose --profile metastore up) ──
   hive-metastore-db:
     image: postgres:15
     container_name: hive-metastore-db
@@ -209,9 +221,13 @@ services:
       - "5432:5432"
     networks:
       - lakehouse
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U analytics -d github_analytics"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   # ── FastAPI Backend ──────────────────────────────────────────────────────
-  # Start with: docker compose --profile app up
   api:
     build:
       context: ./serving/api
@@ -227,8 +243,13 @@ services:
       HDFS_NAMENODE_URL: http://namenode:9870
       HDFS_BASE_PATH: /raw
       HDFS_USER: root
+      # Docker socket path for triggering Spark jobs
+      DOCKER_HOST: unix:///var/run/docker.sock
+      SPARK_MASTER_CONTAINER: spark-master
     volumes:
       - ./serving/api:/app
+      # Mount Docker socket so the API can exec into spark-master to run spark-submit
+      - /var/run/docker.sock:/var/run/docker.sock
     networks:
       - lakehouse
 
@@ -255,6 +276,7 @@ volumes:
   hdfs-data:
   postgres-data:
   hive-meta-data:
+  spark-ivy-cache:   # Persists Ivy/Maven packages downloaded by spark --packages
 
 # ── Networks ───────────────────────────────────────────────────────────────
 networks:

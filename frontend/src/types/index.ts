@@ -76,6 +76,33 @@ export interface CommitTypeStat {
   total: number
 }
 
+export interface CommitItem {
+  hash: string
+  author_name: string
+  author_email: string | null
+  author_date: string | null
+  subject: string
+  commit_type: string
+  insertions: number
+  deletions: number
+  files_changed: number
+}
+
+export interface CommitHistoryResponse {
+  total: number
+  page: number
+  limit: number
+  total_pages: number
+  has_more: boolean
+  commits: CommitItem[]
+}
+
+export interface CommitAuthor {
+  name: string
+  email: string | null
+  commit_count: number
+}
+
 export interface ContributorStat {
   github_login: string
   email: string | null
@@ -86,21 +113,21 @@ export interface ContributorStat {
   files_changed: number
 }
 
-export interface ContributorPrediction {
-  window_days: number
-  probability: number
-  cluster_label: string
-  features: Record<string, any> | string
-  predicted_at: string
-}
-
 export interface IngestionJob {
   id: string
   repo_url: string
   repo_owner: string
   repo_name: string
   branch: string
-  status: 'queued' | 'cloning' | 'extracting' | 'lakehouse_write' | 'analytics' | 'completed' | 'failed'
+  status:
+    | 'queued'
+    | 'cloning'
+    | 'extracting'
+    | 'hdfs_write'
+    | 'analytics'
+    | 'spark_etl'
+    | 'completed'
+    | 'failed'
   progress_pct: number
   current_step: string
   total_commits: number
@@ -110,11 +137,44 @@ export interface IngestionJob {
   created_at: string
 }
 
-export interface RealtimeEvent {
-  id: number | string
-  event_type: string
-  repo_full_name: string
-  actor_login: string
-  received_at: string
-  payload?: any
+// ── Infrastructure Status Types ────────────────────────────────────────────
+
+export interface HdfsParquetFile {
+  path: string
+  size_bytes: number
+  size_mb: number
+  modified: number
+  replication: number
+}
+
+export interface HdfsStatus {
+  namenode_url: string
+  status: 'reachable' | 'unreachable'
+  error?: string
+  raw_parquet_files: HdfsParquetFile[]
+  raw_total_files: number
+  warehouse_namespaces: string[]
+}
+
+export interface SparkApp {
+  id: string
+  name: string
+  status: string
+  cores?: number
+  memory_per_executor_mb?: number
+  duration_ms?: number
+  submit_date?: string
+}
+
+export interface SparkStatus {
+  status: 'reachable' | 'unreachable'
+  error?: string
+  master_url?: string
+  alive_workers?: number
+  cores_used?: number
+  cores_total?: number
+  memory_used_mb?: number
+  memory_total_mb?: number
+  active_apps: SparkApp[]
+  completed_apps: SparkApp[]
 }

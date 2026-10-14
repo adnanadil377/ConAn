@@ -111,7 +111,7 @@ export const IngestionModal: React.FC<IngestionModalProps> = ({
               Ingest Repository
             </div>
             <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-              Blobless clone extraction into MinIO Parquet & PostgreSQL.
+              Git blobless clone → HDFS Parquet → Spark ETL → Iceberg Lakehouse
             </div>
           </div>
 

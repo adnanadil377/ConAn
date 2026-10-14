@@ -1,45 +1,58 @@
 """
-FastAPI serving layer for GitHub Contribution Analytics Lakehouse.
+FastAPI serving layer — GitHub Contribution Analytics Lakehouse
 
 Endpoints:
-  POST /repos/ingest                 – trigger asynchronous repo ingestion (unlimited depth, private token support)
-  GET  /repos/jobs/{job_id}          – check ingestion job status & real-time progress
-  GET  /repos/jobs                   – list recent ingestion jobs
-  GET  /repos                        – list tracked repositories
-  GET  /repos/{owner}/{name}/overview– comprehensive high-level analytics & metrics
-  GET  /repos/{owner}/{name}/stats   – contributor stats (paginated, filterable by period)
-  GET  /repos/{owner}/{name}/health  – project health score & breakdown
-  GET  /repos/{owner}/{name}/busfactor– bus-factor per module
-  GET  /repos/{owner}/{name}/graph   – collaboration graph edges (for D3 force graph)
-  GET  /repos/{owner}/{name}/hotspots– top code modules and churn hot spots
+  POST /repos/ingest                      – async repo ingestion (unlimited depth, private token support)
+  GET  /repos/jobs/{job_id}               – ingestion job status & real-time step progress
+  GET  /repos/jobs                        – list recent ingestion jobs
+  GET  /repos                             – list tracked repositories
+  GET  /repos/{owner}/{name}/overview     – high-level analytics & metrics
+  GET  /repos/{owner}/{name}/stats        – contributor stats (paginated, filterable)
+  GET  /repos/{owner}/{name}/health       – project health score & breakdown
+  GET  /repos/{owner}/{name}/busfactor    – bus-factor per module
+  GET  /repos/{owner}/{name}/graph        – collaboration graph edges (D3 force graph)
+  GET  /repos/{owner}/{name}/hotspots     – top code modules by churn / ownership concentration
   GET  /repos/{owner}/{name}/commit-types – commit type distribution
-  POST /repos/{owner}/{name}/sync    – trigger an incremental sync / refresh
-  DELETE /repos/{owner}/{name}       – delete repository and cascade analytics
-  GET  /contributors/{login}/prediction – retention prediction + persona cluster
-  GET  /realtime/events              – latest real-time events (SSE stream)
-  GET  /health                       – service health check
+  POST /repos/{owner}/{name}/sync         – trigger incremental re-sync
+  DELETE /repos/{owner}/{name}            – delete repository and cascade all analytics
+  GET  /hdfs/status                       – HDFS namenode status and stored files
+  GET  /spark/status                      – Spark cluster status from Spark master REST API
+  GET  /health                            – service health check
 """
 from __future__ import annotations
 
 import asyncio
+import io
 import json
+import math
 import os
+import time
 import uuid
-from typing import AsyncGenerator
+from typing import Any
 
 import asyncpg
+import pyarrow as pa
+import pyarrow.compute as pc
+import pyarrow.parquet as pq
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from pipeline import parse_repo_url, run_ingestion_pipeline
+from pipeline import (
+    classify_subject,
+    get_hdfs_client,
+    parse_repo_url,
+    run_ingestion_pipeline,
+)
 
 # ── App ────────────────────────────────────────────────────────────────────
 app = FastAPI(
     title="GitHub Analytics Lakehouse API",
-    description="Serves pre-computed analytics from the Spark + Iceberg lakehouse and manages asynchronous ingestion.",
-    version="0.2.0",
+    description=(
+        "Serves pre-computed analytics from the HDFS + Spark + Iceberg lakehouse "
+        "and manages asynchronous repository ingestion."
+    ),
+    version="0.3.0",
 )
 
 app.add_middleware(
@@ -80,14 +93,23 @@ async def shutdown():
 # ── Health ─────────────────────────────────────────────────────────────────
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    return {"status": "ok", "version": "0.3.0"}
 
 
 # ── Request Models ─────────────────────────────────────────────────────────
 class IngestRequest(BaseModel):
-    repo_url: str = Field(..., description="GitHub URL (e.g. https://github.com/owner/repo) or owner/repo shorthand")
-    access_token: str | None = Field(None, description="GitHub Personal Access Token for private repositories")
-    branch: str | None = Field(None, description="Target branch (defaults to remote default branch, e.g. main/master)")
+    repo_url: str = Field(
+        ...,
+        description="GitHub URL (e.g. https://github.com/owner/repo) or owner/repo shorthand",
+    )
+    access_token: str | None = Field(
+        None,
+        description="GitHub Personal Access Token for private repositories",
+    )
+    branch: str | None = Field(
+        None,
+        description="Target branch (defaults to remote default branch, e.g. main/master)",
+    )
 
 
 # ── Ingestion Job Endpoints ────────────────────────────────────────────────
@@ -95,9 +117,10 @@ class IngestRequest(BaseModel):
 async def trigger_ingestion(req: IngestRequest, background_tasks: BackgroundTasks):
     """
     Submits a repository for ingestion:
-    - Zero depth limits (full commit history on main/default branch).
-    - Private repositories supported with personal access tokens.
-    - Asynchronous processing with real-time status tracking.
+      - Zero depth limits (full commit history)
+      - Private repositories supported with personal access tokens
+      - Asynchronous processing with real-time status tracking
+      - Triggers Spark CommitETL and GraphAnalytics after HDFS upload
     """
     try:
         owner, name = parse_repo_url(req.repo_url)
@@ -107,7 +130,6 @@ async def trigger_ingestion(req: IngestRequest, background_tasks: BackgroundTask
     job_id = uuid.uuid4()
     p = await pool()
 
-    # Create job in PostgreSQL
     await p.execute(
         """
         INSERT INTO ingestion_jobs (id, repo_url, repo_owner, repo_name, branch, status, progress_pct, current_step)
@@ -120,7 +142,6 @@ async def trigger_ingestion(req: IngestRequest, background_tasks: BackgroundTask
         req.branch or "main",
     )
 
-    # Spawn async background worker
     background_tasks.add_task(
         run_ingestion_pipeline,
         str(job_id),
@@ -134,7 +155,11 @@ async def trigger_ingestion(req: IngestRequest, background_tasks: BackgroundTask
         "owner": owner,
         "name": name,
         "status": "queued",
-        "message": f"Ingestion queued for {owner}/{name}. Poll /repos/jobs/{job_id} for progress.",
+        "message": (
+            f"Ingestion queued for {owner}/{name}. "
+            f"Poll /repos/jobs/{job_id} for progress. "
+            f"Spark jobs will run automatically after HDFS upload."
+        ),
     }
 
 
@@ -177,12 +202,14 @@ async def list_jobs(limit: int = Query(30, le=100)):
 async def list_repos():
     """List all tracked repositories with synchronization metadata."""
     p = await pool()
-    rows = await p.fetch("""
+    rows = await p.fetch(
+        """
         SELECT id, owner, name, full_name, stars, forks, language,
                default_branch, head_commit_hash, is_private, synced_at
         FROM repositories
         ORDER BY synced_at DESC
-    """)
+        """
+    )
     return [dict(r) for r in rows]
 
 
@@ -205,7 +232,6 @@ async def repo_overview(owner: str, name: str):
 
     repo_id = repo["id"]
 
-    # Health score
     health_row = await p.fetchrow(
         """
         SELECT contributor_diversity, contributor_retention, collaboration,
@@ -219,7 +245,6 @@ async def repo_overview(owner: str, name: str):
         repo_id,
     )
 
-    # Aggregates from commit_stats
     stats_agg = await p.fetchrow(
         """
         SELECT COUNT(DISTINCT contributor_id) AS total_contributors,
@@ -235,7 +260,6 @@ async def repo_overview(owner: str, name: str):
         repo_id,
     )
 
-    # Top modules from bus factor
     top_modules = await p.fetch(
         """
         SELECT module_path, bus_factor, top_owner, top_owner_pct
@@ -290,8 +314,8 @@ async def resync_repo(owner: str, name: str, background_tasks: BackgroundTasks):
         raise HTTPException(404, f"Repository {owner}/{name} not found")
 
     repo_url = f"https://github.com/{owner}/{name}"
-    branch = repo["default_branch"] or "main"
-    job_id = uuid.uuid4()
+    branch   = repo["default_branch"] or "main"
+    job_id   = uuid.uuid4()
 
     await p.execute(
         """
@@ -338,8 +362,11 @@ async def delete_repo(owner: str, name: str):
             await conn.execute("DELETE FROM health_scores WHERE repo_id = $1", repo_id)
             await conn.execute("DELETE FROM bus_factor WHERE repo_id = $1", repo_id)
             await conn.execute("DELETE FROM collaboration_edges WHERE repo_id = $1", repo_id)
-            await conn.execute("DELETE FROM retention_predictions WHERE repo_id = $1", repo_id)
-            await conn.execute("DELETE FROM ingestion_jobs WHERE repo_owner = $1 AND repo_name = $2", owner, name)
+            await conn.execute(
+                "DELETE FROM ingestion_jobs WHERE repo_owner = $1 AND repo_name = $2",
+                owner,
+                name,
+            )
             await conn.execute("DELETE FROM repositories WHERE id = $1", repo_id)
 
     return {"status": "deleted", "repository": f"{owner}/{name}"}
@@ -380,7 +407,7 @@ async def repo_stats(
         JOIN contributors c ON c.id = cs.contributor_id
         WHERE {where}
         ORDER BY cs.commit_count DESC
-        LIMIT ${ len(params)+1 }
+        LIMIT ${len(params)+1}
         """,
         *params,
         limit,
@@ -484,67 +511,6 @@ async def collab_graph(owner: str, name: str, min_weight: int = 1):
     }
 
 
-# ── ML predictions ─────────────────────────────────────────────────────────
-@app.get("/contributors/{login}/prediction")
-async def contributor_prediction(login: str):
-    p = await pool()
-    contrib = await p.fetchrow(
-        "SELECT id FROM contributors WHERE github_login=$1", login
-    )
-    if not contrib:
-        raise HTTPException(404, "Contributor not found")
-
-    rows = await p.fetch(
-        """
-        SELECT window_days, probability, cluster_label, features, predicted_at
-        FROM retention_predictions
-        WHERE contributor_id = $1
-        ORDER BY window_days
-        """,
-        contrib["id"],
-    )
-    return [dict(r) for r in rows]
-
-
-# ── Real-time SSE events ───────────────────────────────────────────────────
-@app.get("/realtime/events")
-async def realtime_events(repo: str | None = None):
-    """Server-Sent Events stream of the latest GitHub events."""
-    async def event_generator() -> AsyncGenerator[str, None]:
-        p = await pool()
-        last_id = 0
-        while True:
-            condition = "id > $1"
-            params: list = [last_id]
-            if repo:
-                params.append(repo)
-                condition += f" AND repo_full_name = ${len(params)}"
-
-            rows = await p.fetch(
-                f"""
-                SELECT id, event_type, repo_full_name, actor_login, received_at
-                FROM realtime_events
-                WHERE {condition}
-                ORDER BY id DESC
-                LIMIT 20
-                """,
-                *params,
-            )
-
-            for row in rows:
-                last_id = max(last_id, row["id"])
-                data = json.dumps(dict(row), default=str)
-                yield f"data: {data}\n\n"
-
-            await asyncio.sleep(2)
-
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
-
-
 # ── Commit type distribution ───────────────────────────────────────────────
 @app.get("/repos/{owner}/{name}/commit-types")
 async def commit_types(owner: str, name: str, year: int | None = None):
@@ -572,3 +538,402 @@ async def commit_types(owner: str, name: str, year: int | None = None):
         *params,
     )
     return [dict(r) for r in rows]
+
+
+# ── Full Commit History & Author Search (Lazy Loading & Paged) ─────────────
+_HDFS_PARQUET_CACHE: dict[str, tuple[float, pa.Table]] = {}
+
+
+def get_hdfs_parquet_table(owner: str, name: str) -> pa.Table | None:
+    """Reads commits.parquet from HDFS and caches in memory for fast paging & search."""
+    cache_key = f"{owner}__{name}"
+    now = time.time()
+    if cache_key in _HDFS_PARQUET_CACHE:
+        ts, tbl = _HDFS_PARQUET_CACHE[cache_key]
+        if now - ts < 600:  # 10 minute cache
+            return tbl
+
+    hdfs_path = f"/raw/git_events/repository={owner}__{name}/commits.parquet"
+    try:
+        client = get_hdfs_client()
+        with client.read(hdfs_path) as reader:
+            bio = io.BytesIO(reader.read())
+            table = pq.read_table(bio)
+            # Ensure commit_type column exists
+            if "commit_type" not in table.column_names and "subject" in table.column_names:
+                subjects = table["subject"].to_pylist()
+                c_types = [classify_subject(s) for s in subjects]
+                table = table.append_column("commit_type", pa.array(c_types))
+            _HDFS_PARQUET_CACHE[cache_key] = (now, table)
+            return table
+    except Exception as e:
+        print(f"[HDFS Read] Commits Parquet not accessible for {owner}/{name}: {e}")
+        return None
+
+
+@app.get("/repos/{owner}/{name}/commits")
+async def get_commits(
+    owner: str,
+    name: str,
+    page: int = Query(1, ge=1, description="Page number, 1-indexed"),
+    limit: int = Query(50, ge=1, le=200, description="Page size (items per page)"),
+    author: str | None = Query(None, description="Filter by author name or email"),
+    search: str | None = Query(None, description="Search term in commit message, hash, or author"),
+    commit_type: str | None = Query(None, description="Filter by commit taxonomy type"),
+    sort: str = Query("desc", description="Sort order by author_date ('desc' or 'asc')"),
+):
+    """
+    Returns paginated commit history with support for lazy loading,
+    author filtering, taxonomy classification filtering, and keyword search.
+    """
+    p = await pool()
+    repo = await p.fetchrow(
+        "SELECT id FROM repositories WHERE owner=$1 AND name=$2", owner, name
+    )
+    if not repo:
+        raise HTTPException(404, "Repository not found")
+
+    repo_id = repo["id"]
+    sort_dir = "ASC" if sort.lower() == "asc" else "DESC"
+
+    # 1. Query indexed PostgreSQL commits table
+    db_count = await p.fetchval("SELECT count(*) FROM commits WHERE repo_id=$1", repo_id)
+
+    if db_count and db_count > 0:
+        conditions = ["repo_id = $1"]
+        params: list[Any] = [repo_id]
+
+        if author and author.strip():
+            params.append(f"%{author.strip()}%")
+            conditions.append(f"(author_name ILIKE ${len(params)} OR author_email ILIKE ${len(params)})")
+
+        if commit_type and commit_type.strip().upper() not in ("ALL", ""):
+            params.append(commit_type.strip().upper())
+            conditions.append(f"commit_type = ${len(params)}")
+
+        if search and search.strip():
+            s = f"%{search.strip()}%"
+            params.append(s)
+            conditions.append(f"(subject ILIKE ${len(params)} OR hash ILIKE ${len(params)} OR author_name ILIKE ${len(params)})")
+
+        where_clause = " AND ".join(conditions)
+        total_matching = await p.fetchval(f"SELECT count(*) FROM commits WHERE {where_clause}", *params)
+
+        offset = (page - 1) * limit
+        page_params = list(params)
+        page_params.extend([limit, offset])
+
+        rows = await p.fetch(
+            f"""
+            SELECT hash, author_name, author_email, author_date, subject,
+                   commit_type, insertions, deletions, files_changed
+            FROM commits
+            WHERE {where_clause}
+            ORDER BY author_date {sort_dir} NULLS LAST, id {sort_dir}
+            LIMIT ${len(page_params)-1} OFFSET ${len(page_params)}
+            """,
+            *page_params,
+        )
+
+        commits_data = [
+            {
+                "hash": r["hash"],
+                "author_name": r["author_name"],
+                "author_email": r["author_email"],
+                "author_date": r["author_date"].isoformat() if r["author_date"] else None,
+                "subject": r["subject"],
+                "commit_type": r["commit_type"] or "OTHER",
+                "insertions": int(r["insertions"] or 0),
+                "deletions": int(r["deletions"] or 0),
+                "files_changed": int(r["files_changed"] or 0),
+            }
+            for r in rows
+        ]
+
+        total_pages = math.ceil(total_matching / limit) if total_matching > 0 else 1
+        return {
+            "total": total_matching,
+            "page": page,
+            "limit": limit,
+            "total_pages": total_pages,
+            "has_more": (page * limit) < total_matching,
+            "commits": commits_data,
+        }
+
+    # 2. Fallback: Query directly from HDFS Parquet lakehouse
+    table = get_hdfs_parquet_table(owner, name)
+    if table is not None:
+        mask = None
+
+        if author and author.strip():
+            author_term = author.strip().lower()
+            m_author = pc.match_substring(pc.utf8_lower(table["author_name"]), author_term)
+            if "author_email" in table.column_names:
+                m_email = pc.match_substring(pc.utf8_lower(table["author_email"]), author_term)
+                m_author = pc.or_(m_author, m_email)
+            mask = m_author
+
+        if commit_type and commit_type.strip().upper() not in ("ALL", ""):
+            m_type = pc.equal(table["commit_type"], commit_type.strip().upper())
+            mask = m_type if mask is None else pc.and_(mask, m_type)
+
+        if search and search.strip():
+            s_term = search.strip().lower()
+            m_sub = pc.match_substring(pc.utf8_lower(table["subject"]), s_term)
+            m_hash = pc.match_substring(pc.utf8_lower(table["hash"]), s_term)
+            m_combined = pc.or_(m_sub, m_hash)
+            mask = m_combined if mask is None else pc.and_(mask, m_combined)
+
+        if mask is not None:
+            filtered_table = table.filter(mask)
+        else:
+            filtered_table = table
+
+        total_matching = len(filtered_table)
+        offset = (page - 1) * limit
+        slice_len = min(limit, max(0, total_matching - offset))
+
+        if slice_len > 0 and offset < total_matching:
+            page_slice = filtered_table.slice(offset, slice_len)
+            pylist = page_slice.to_pylist()
+        else:
+            pylist = []
+
+        commits_data = []
+        for r in pylist:
+            a_date = r.get("author_date")
+            if a_date is not None and hasattr(a_date, "isoformat"):
+                a_date_str = a_date.isoformat()
+            elif a_date is not None:
+                a_date_str = str(a_date)
+            else:
+                a_date_str = None
+
+            commits_data.append({
+                "hash": str(r.get("hash", "")),
+                "author_name": str(r.get("author_name", "Unknown")),
+                "author_email": str(r.get("author_email")) if r.get("author_email") else None,
+                "author_date": a_date_str,
+                "subject": str(r.get("subject", "")),
+                "commit_type": str(r.get("commit_type", "OTHER")),
+                "insertions": int(r.get("insertions", 0) or 0),
+                "deletions": int(r.get("deletions", 0) or 0),
+                "files_changed": int(r.get("files_changed", 0) or 0),
+            })
+
+        total_pages = math.ceil(total_matching / limit) if total_matching > 0 else 1
+        return {
+            "total": total_matching,
+            "page": page,
+            "limit": limit,
+            "total_pages": total_pages,
+            "has_more": (page * limit) < total_matching,
+            "commits": commits_data,
+        }
+
+    return {
+        "total": 0,
+        "page": page,
+        "limit": limit,
+        "total_pages": 0,
+        "has_more": False,
+        "commits": [],
+    }
+
+
+@app.get("/repos/{owner}/{name}/commit-authors")
+async def get_commit_authors(
+    owner: str,
+    name: str,
+    q: str | None = Query(None, description="Search filter for author name or email"),
+    limit: int = Query(50, ge=1, le=200, description="Max authors to return"),
+):
+    """
+    Search authors/persons who committed to this repository.
+    Enables user to search every person across the entire commit history.
+    """
+    p = await pool()
+    repo = await p.fetchrow("SELECT id FROM repositories WHERE owner=$1 AND name=$2", owner, name)
+    if not repo:
+        raise HTTPException(404, "Repository not found")
+
+    repo_id = repo["id"]
+    q_filter = f"%{q.strip()}%" if q and q.strip() else None
+
+    # Check commits table first
+    db_count = await p.fetchval("SELECT count(*) FROM commits WHERE repo_id=$1", repo_id)
+    if db_count and db_count > 0:
+        if q_filter:
+            rows = await p.fetch(
+                """
+                SELECT author_name AS name, author_email AS email, count(*) AS commit_count
+                FROM commits
+                WHERE repo_id = $1 AND (author_name ILIKE $2 OR author_email ILIKE $2)
+                GROUP BY author_name, author_email
+                ORDER BY commit_count DESC
+                LIMIT $3
+                """,
+                repo_id, q_filter, limit,
+            )
+        else:
+            rows = await p.fetch(
+                """
+                SELECT author_name AS name, author_email AS email, count(*) AS commit_count
+                FROM commits
+                WHERE repo_id = $1
+                GROUP BY author_name, author_email
+                ORDER BY commit_count DESC
+                LIMIT $2
+                """,
+                repo_id, limit,
+            )
+        return [dict(r) for r in rows]
+
+    # Query from contributors + commit_stats
+    if q_filter:
+        rows = await p.fetch(
+            """
+            SELECT c.github_login AS name, c.email, SUM(cs.commit_count) AS commit_count
+            FROM commit_stats cs
+            JOIN contributors c ON c.id = cs.contributor_id
+            WHERE cs.repo_id = $1 AND (c.github_login ILIKE $2 OR c.email ILIKE $2)
+            GROUP BY c.github_login, c.email
+            ORDER BY commit_count DESC
+            LIMIT $3
+            """,
+            repo_id, q_filter, limit,
+        )
+    else:
+        rows = await p.fetch(
+            """
+            SELECT c.github_login AS name, c.email, SUM(cs.commit_count) AS commit_count
+            FROM commit_stats cs
+            JOIN contributors c ON c.id = cs.contributor_id
+            WHERE cs.repo_id = $1
+            GROUP BY c.github_login, c.email
+            ORDER BY commit_count DESC
+            LIMIT $2
+            """,
+            repo_id, limit,
+        )
+    return [dict(r) for r in rows]
+
+
+# ── HDFS Status ────────────────────────────────────────────────────────────
+@app.get("/hdfs/status")
+async def hdfs_status():
+    """
+    Query the HDFS NameNode for cluster health and list stored raw Parquet files.
+    Requires the `hdfs` Python library to be reachable from this container.
+    """
+    import hdfs as hdfs_lib
+
+    hdfs_url  = os.getenv("HDFS_NAMENODE_URL", "http://namenode:9870")
+    hdfs_user = os.getenv("HDFS_USER", "root")
+    base_path = os.getenv("HDFS_BASE_PATH", "/raw")
+
+    try:
+        client = hdfs_lib.InsecureClient(hdfs_url, user=hdfs_user)
+        # List all parquet files under /raw/git_events
+        try:
+            raw_files = client.list(f"{base_path}/git_events", status=True)
+        except Exception:
+            raw_files = []
+
+        repos_on_hdfs = []
+        for entry_name, entry_status in raw_files:
+            try:
+                parquet_files = client.list(
+                    f"{base_path}/git_events/{entry_name}", status=True
+                )
+                for fname, fstatus in parquet_files:
+                    repos_on_hdfs.append(
+                        {
+                            "path": f"{base_path}/git_events/{entry_name}/{fname}",
+                            "size_bytes": fstatus.get("length", 0),
+                            "size_mb": round(fstatus.get("length", 0) / (1024 * 1024), 2),
+                            "modified": fstatus.get("modificationTime", 0),
+                            "replication": fstatus.get("replication", 1),
+                        }
+                    )
+            except Exception:
+                pass
+
+        # Check warehouse Iceberg tables
+        try:
+            warehouse_contents = client.list("/warehouse/data", status=False)
+        except Exception:
+            warehouse_contents = []
+
+        return {
+            "namenode_url": hdfs_url,
+            "status": "reachable",
+            "raw_parquet_files": repos_on_hdfs,
+            "raw_total_files": len(repos_on_hdfs),
+            "warehouse_namespaces": list(warehouse_contents),
+        }
+
+    except Exception as exc:
+        return {
+            "namenode_url": hdfs_url,
+            "status": "unreachable",
+            "error": str(exc),
+            "raw_parquet_files": [],
+        }
+
+
+# ── Spark Status ───────────────────────────────────────────────────────────
+@app.get("/spark/status")
+async def spark_status():
+    """
+    Query the Spark master REST API (port 8080/json/) for cluster status,
+    running applications, and completed jobs.
+    """
+    import httpx
+
+    spark_master_ui = "http://spark-master:8080"
+
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client_http:
+            resp = await client_http.get(f"{spark_master_ui}/json/")
+            resp.raise_for_status()
+            data = resp.json()
+
+        return {
+            "status": "reachable",
+            "master_url": data.get("url", "spark://spark-master:7077"),
+            "alive_workers": data.get("aliveworkers", 0),
+            "cores_used": data.get("coresused", 0),
+            "cores_total": data.get("cores", 0),
+            "memory_used_mb": data.get("memoryused", 0),
+            "memory_total_mb": data.get("memory", 0),
+            "active_apps": [
+                {
+                    "id": a.get("id"),
+                    "name": a.get("name"),
+                    "status": a.get("status"),
+                    "cores": a.get("cores"),
+                    "memory_per_executor_mb": a.get("memoryperexecutor"),
+                    "submit_date": a.get("submitdate"),
+                }
+                for a in data.get("activeapps", [])
+            ],
+            "completed_apps": [
+                {
+                    "id": a.get("id"),
+                    "name": a.get("name"),
+                    "status": a.get("status"),
+                    "duration_ms": a.get("duration"),
+                    "submit_date": a.get("submitdate"),
+                }
+                for a in data.get("completedapps", [])[-10:]  # last 10
+            ],
+        }
+
+    except Exception as exc:
+        return {
+            "status": "unreachable",
+            "error": str(exc),
+            "active_apps": [],
+            "completed_apps": [],
+        }
