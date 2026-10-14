@@ -1,5 +1,8 @@
 import {
   CollaborationGraphData,
+  CommitAuthor,
+  CommitHistoryResponse,
+  CommitItem,
   CommitTypeStat,
   ContributorStat,
   HdfsStatus,
@@ -109,3 +112,43 @@ export async function fetchSparkStatus(): Promise<SparkStatus> {
   if (!res.ok) throw new Error('Failed to fetch Spark status')
   return res.json()
 }
+
+export interface FetchCommitsParams {
+  owner: string
+  name: string
+  page?: number
+  limit?: number
+  author?: string
+  search?: string
+  commit_type?: string
+  sort?: string
+}
+
+export async function fetchCommits(params: FetchCommitsParams): Promise<CommitHistoryResponse> {
+  const q = new URLSearchParams()
+  if (params.page) q.set('page', String(params.page))
+  if (params.limit) q.set('limit', String(params.limit))
+  if (params.author && params.author.trim()) q.set('author', params.author.trim())
+  if (params.search && params.search.trim()) q.set('search', params.search.trim())
+  if (params.commit_type && params.commit_type !== 'ALL') q.set('commit_type', params.commit_type)
+  if (params.sort) q.set('sort', params.sort)
+
+  const res = await fetch(`${API_BASE}/repos/${params.owner}/${params.name}/commits?${q.toString()}`)
+  if (!res.ok) throw new Error('Failed to fetch commits')
+  return res.json()
+}
+
+export async function fetchCommitAuthors(
+  owner: string,
+  name: string,
+  query?: string,
+): Promise<CommitAuthor[]> {
+  const q = new URLSearchParams()
+  if (query && query.trim()) q.set('q', query.trim())
+  q.set('limit', '50')
+
+  const res = await fetch(`${API_BASE}/repos/${owner}/${name}/commit-authors?${q.toString()}`)
+  if (!res.ok) return []
+  return res.json()
+}
+

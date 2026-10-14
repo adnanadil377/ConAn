@@ -312,11 +312,12 @@ export const App: React.FC = () => {
               />
             )}
 
-            {/* TAB 3: COMMIT TAXONOMY */}
+            {/* TAB 3: COMMIT TAXONOMY & FULL HISTORY */}
             {activeTab === 'commits' && (
               <CommitAnalyticsView
+                repoOwner={selectedRepo?.owner}
+                repoName={selectedRepo?.name}
                 commitTypes={commitTypes}
-                contributorStats={contributorStats}
               />
             )}
 
