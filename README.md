@@ -13,7 +13,8 @@
 A full-stack, enterprise-grade Big Data Lakehouse platform for analyzing GitHub repository contribution patterns, developer collaboration topologies, module-level bus-factor vulnerabilities, and real-time commit streams.
 
 > 📖 **Full Architectural & Systems Specification**: See [docs/PROJECT_ARCHITECTURE_AND_ROADMAP.md](docs/PROJECT_ARCHITECTURE_AND_ROADMAP.md) for an exhaustive guide detailing internal engine mechanics, end-to-end data flows, mathematical formulations, and data contracts.  
-> 📑 **Final Project Report**: See [docs/PROJECT_REPORT.md](docs/PROJECT_REPORT.md) for the complete academic and engineering report covering architecture, tool-by-tool justification, empirical benchmark results, engineering challenges, and team contribution breakdown.
+> 📑 **Final Project Report**: See [docs/PROJECT_REPORT.md](docs/PROJECT_REPORT.md) for the complete academic and engineering report covering architecture, tool-by-tool justification, empirical benchmark results, engineering challenges, and team contribution breakdown.  
+> 📊 **Presentation Slides (LaTeX Beamer)**: See [docs/presentation.tex](docs/presentation.tex) for the complete slide deck covering architecture, benchmarks, challenges, and team contributions.
 
 ---
 
