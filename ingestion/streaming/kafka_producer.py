@@ -25,10 +25,40 @@ import requests
 from confluent_kafka import Producer
 from confluent_kafka.admin import AdminClient, NewTopic
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+    load_dotenv(os.path.join(os.path.dirname(__file__), "..", "..", ".env"))
+except ImportError:
+    pass
+
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "localhost:9092")
 KAFKA_TOPIC     = os.getenv("KAFKA_TOPIC",     "github.events.raw")
 GITHUB_TOKEN    = os.getenv("GITHUB_TOKEN", "")
+API_URL         = os.getenv("API_URL",         "http://api:8000")
 GH_API_BASE     = "https://api.github.com"
+
+
+def fetch_tracked_repos(cli_repos: list[str] | None) -> list[str]:
+    """
+    Fetch dynamically tracked repositories from the API endpoint /streaming/repos.
+    Falls back to CLI arguments, or default ['torvalds/linux'].
+    """
+    for base in [API_URL, "http://localhost:8000"]:
+        if not base:
+            continue
+        try:
+            url = f"{base.rstrip('/')}/streaming/repos"
+            resp = requests.get(url, timeout=3)
+            if resp.status_code == 200:
+                repos = resp.json()
+                if isinstance(repos, list) and len(repos) > 0:
+                    return repos
+        except Exception:
+            pass
+    if cli_repos:
+        return cli_repos
+    return ["torvalds/linux"]
 
 
 # ── Kafka helpers ──────────────────────────────────────────────────────────
@@ -97,23 +127,36 @@ def fetch_events(owner: str, name: str, etag: str | None) -> tuple[list[dict], s
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="GitHub Events → Kafka producer")
-    parser.add_argument("--repos",    nargs="+", required=True, help="owner/repo list")
+    parser.add_argument("--repos",    nargs="*", default=None, help="owner/repo list (optional override)")
     parser.add_argument("--interval", type=int,  default=30,    help="Poll interval (seconds)")
     args = parser.parse_args()
 
     ensure_topic(KAFKA_TOPIC)
     producer = make_producer()
 
-    etags: dict[str, str | None] = {r: None for r in args.repos}
+    etags: dict[str, str | None] = {}
     seen_ids: set[str] = set()
 
-    print(f"Polling {len(args.repos)} repo(s) every {args.interval}s → topic '{KAFKA_TOPIC}'")
+    print(f"Starting GitHub Events producer (polling every {args.interval}s → topic '{KAFKA_TOPIC}')")
 
     while True:
-        for full_name in args.repos:
-            owner, name = full_name.split("/")
+        tracked_repos = fetch_tracked_repos(args.repos)
+
+        # Update etag registry for dynamically added / removed repos
+        for r in tracked_repos:
+            if r not in etags:
+                etags[r] = None
+        for r in list(etags.keys()):
+            if r not in tracked_repos:
+                del etags[r]
+
+        for full_name in tracked_repos:
+            parts = full_name.split("/")
+            if len(parts) != 2:
+                continue
+            owner, name = parts
             try:
-                events, new_etag = fetch_events(owner, name, etags[full_name])
+                events, new_etag = fetch_events(owner, name, etags.get(full_name))
                 etags[full_name] = new_etag
 
                 fresh = [e for e in events if e.get("id") not in seen_ids]

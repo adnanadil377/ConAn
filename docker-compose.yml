@@ -69,6 +69,25 @@ services:
     networks:
       - lakehouse
 
+  # Polls GitHub Events API and publishes PushEvents → Kafka topic
+  kafka-producer:
+    build:
+      context: ./ingestion/streaming
+      dockerfile: Dockerfile
+    container_name: kafka-producer
+    depends_on:
+      - kafka
+      - api
+    environment:
+      KAFKA_BOOTSTRAP: kafka:29092
+      KAFKA_TOPIC: github.events.raw
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      API_URL: http://api:8000
+    command: python kafka_producer.py --interval 30
+    networks:
+      - lakehouse
+    restart: unless-stopped
+
   # ── HDFS ─────────────────────────────────────────────────────────────────
   namenode:
     image: apache/hadoop:3.3.6
@@ -236,6 +255,7 @@ services:
     depends_on:
       - postgres
       - namenode
+      - kafka
     ports:
       - "8000:8000"
     environment:
@@ -243,11 +263,17 @@ services:
       HDFS_NAMENODE_URL: http://namenode:9870
       HDFS_BASE_PATH: /raw
       HDFS_USER: root
+      KAFKA_BOOTSTRAP: kafka:29092
+      KAFKA_TOPIC: github.events.raw
+      HDFS_FLUSH_THRESHOLD: "20"
+      HDFS_FLUSH_INTERVAL: "60"
       # Docker socket path for triggering Spark jobs
       DOCKER_HOST: unix:///var/run/docker.sock
       SPARK_MASTER_CONTAINER: spark-master
     volumes:
       - ./serving/api:/app
+      # Mount streaming consumer so FastAPI can import kafka_consumer at runtime
+      - ./ingestion/streaming:/ingestion/streaming:ro
       # Mount Docker socket so the API can exec into spark-master to run spark-submit
       - /var/run/docker.sock:/var/run/docker.sock
     networks:

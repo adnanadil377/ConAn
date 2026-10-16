@@ -10,6 +10,7 @@ import { CommitAnalyticsView } from './components/CommitAnalyticsView'
 import { HealthScorePanel } from './components/HealthScorePanel'
 import { InfrastructureMonitor } from './components/InfrastructureMonitor'
 import { IngestionModal } from './components/IngestionModal'
+import { LiveEventStream } from './components/LiveEventStream'
 import { Navbar } from './components/Navbar'
 import { OverviewCards } from './components/OverviewCards'
 import {
@@ -29,7 +30,7 @@ import type {
   Repository,
 } from './types'
 
-type ActiveTab = 'overview' | 'network' | 'commits' | 'infra'
+type ActiveTab = 'overview' | 'network' | 'commits' | 'infra' | 'live'
 
 export const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<ActiveTab>('overview')
@@ -284,6 +285,25 @@ export const App: React.FC = () => {
               >
                 <span>Infrastructure</span>
               </button>
+              <button
+                id="tab-live"
+                className={`subnav-tab ${activeTab === 'live' ? 'active' : ''}`}
+                onClick={() => setActiveTab('live')}
+                style={{ display: 'flex', alignItems: 'center', gap: '5px' }}
+              >
+                {/* Blinking dot */}
+                <span style={{
+                  display: 'inline-block',
+                  width: 6,
+                  height: 6,
+                  borderRadius: '50%',
+                  backgroundColor: 'var(--status-emerald)',
+                  boxShadow: '0 0 5px var(--status-emerald)',
+                  animation: 'livePulse 2s infinite',
+                  flexShrink: 0,
+                }} />
+                <span>Live Feed</span>
+              </button>
             </nav>
           </div>
         )}
@@ -327,6 +347,13 @@ export const App: React.FC = () => {
                 repoOwner={selectedRepo?.owner}
                 repoName={selectedRepo?.name}
               />
+            )}
+
+            {/* TAB 5: LIVE COMMIT FEED */}
+            {activeTab === 'live' && (
+              <div className="panel" style={{ height: '620px', overflow: 'hidden', padding: 0 }}>
+                <LiveEventStream selectedRepo={selectedRepo} />
+              </div>
             )}
           </main>
         ) : (

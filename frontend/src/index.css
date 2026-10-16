@@ -365,3 +365,28 @@ h1, h2, h3, h4, h5, h6 {
   box-shadow: 0 20px 40px rgba(0, 0, 0, 0.6);
   overflow: hidden;
 }
+
+/* ── Live Event Stream ─────────────────────────────────────────────────── */
+@keyframes slideInCommit {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes livePulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.35; }
+}
+
+.live-commit-card {
+  transition: background 1.4s ease, border-color 1.4s ease;
+}
+
+.live-commit-card--new {
+  animation: slideInCommit 0.3s ease-out;
+}
