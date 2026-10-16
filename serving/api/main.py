@@ -24,18 +24,22 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import logging
 import math
 import os
 import time
 import uuid
-from typing import Any
+from contextlib import asynccontextmanager
+from typing import Any, AsyncGenerator
 
 import asyncpg
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from pipeline import (
@@ -45,7 +49,91 @@ from pipeline import (
     run_ingestion_pipeline,
 )
 
+logger = logging.getLogger("api")
+
+# ── SSE subscriber set ─────────────────────────────────────────────────────
+# Each connected browser gets its own asyncio.Queue added here.
+_sse_subscribers: set[asyncio.Queue] = set()
+
+# ── Kafka consumer fan-out task ────────────────────────────────────────────
+async def _kafka_fanout_task() -> None:
+    """
+    Bridges the kafka_consumer's asyncio.Queue → individual SSE subscriber queues.
+    Runs as a background task so it doesn't block the event loop.
+    """
+    try:
+        # Import consumer module from the mounted ingestion volume if available,
+        # otherwise fall back to the installed package path.
+        import sys, pathlib
+        _consumer_dir = pathlib.Path("/ingestion/streaming")
+        if _consumer_dir.exists() and str(_consumer_dir) not in sys.path:
+            sys.path.insert(0, str(_consumer_dir))
+
+        from kafka_consumer import consume_kafka_events, get_live_queue  # type: ignore
+    except ImportError:
+        logger.warning("kafka_consumer not found — live streaming disabled")
+        return
+
+    live_q      = get_live_queue()
+    stop_event  = asyncio.Event()
+    consumer_t  = asyncio.create_task(consume_kafka_events(stop_event))
+    logger.info("Kafka consumer background task started")
+
+    try:
+        while True:
+            event = await live_q.get()
+            # Fan-out to all connected SSE subscribers
+            dead: set[asyncio.Queue] = set()
+            for sub_q in _sse_subscribers:
+                try:
+                    sub_q.put_nowait(event)
+                except asyncio.QueueFull:
+                    dead.add(sub_q)   # slow/disconnected client
+            _sse_subscribers.difference_update(dead)
+    except asyncio.CancelledError:
+        stop_event.set()
+        consumer_t.cancel()
+        logger.info("Kafka fan-out task cancelled")
+
+
 # ── App ────────────────────────────────────────────────────────────────────
+@asynccontextmanager
+async def lifespan(application: FastAPI):
+    """Start Kafka consumer fan-out on startup; clean up on shutdown."""
+    p = await pool()           # warm up DB pool
+    try:
+        await p.execute(
+            """
+            CREATE TABLE IF NOT EXISTS streaming_repos (
+                repo TEXT PRIMARY KEY,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            );
+            """
+        )
+        count = await p.fetchval("SELECT COUNT(*) FROM streaming_repos")
+        if count == 0:
+            existing = await p.fetch("SELECT full_name FROM repositories ORDER BY synced_at DESC LIMIT 3")
+            if existing:
+                for row in existing:
+                    await p.execute("INSERT INTO streaming_repos (repo) VALUES ($1) ON CONFLICT DO NOTHING", row["full_name"])
+            else:
+                await p.execute("INSERT INTO streaming_repos (repo) VALUES ('torvalds/linux') ON CONFLICT DO NOTHING")
+    except Exception as exc:
+        logger.warning(f"Failed to initialize streaming_repos table: {exc}")
+
+    fanout = asyncio.create_task(_kafka_fanout_task())
+    try:
+        yield
+    finally:
+        fanout.cancel()
+        try:
+            await fanout
+        except asyncio.CancelledError:
+            pass
+        if _pool:
+            await _pool.close()
+
+
 app = FastAPI(
     title="GitHub Analytics Lakehouse API",
     description=(
@@ -53,6 +141,7 @@ app = FastAPI(
         "and manages asynchronous repository ingestion."
     ),
     version="0.3.0",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -77,17 +166,6 @@ async def pool() -> asyncpg.Pool:
     if _pool is None:
         _pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10)
     return _pool
-
-
-@app.on_event("startup")
-async def startup():
-    await pool()
-
-
-@app.on_event("shutdown")
-async def shutdown():
-    if _pool:
-        await _pool.close()
 
 
 # ── Health ─────────────────────────────────────────────────────────────────
@@ -942,3 +1020,114 @@ async def spark_status():
             "active_apps": [],
             "completed_apps": [],
         }
+
+
+# ── Live Commit SSE Stream ─────────────────────────────────────────────────
+@app.get("/events/stream")
+async def live_event_stream(request: Request):
+    """
+    Server-Sent Events endpoint — streams live commit events to the browser.
+
+    Each event is a JSON object:
+      { repo, hash, short_hash, author, message, commit_type, committed_at }
+
+    The browser connects with:
+      const src = new EventSource('http://localhost:8000/events/stream')
+      src.onmessage = (e) => { const commit = JSON.parse(e.data); ... }
+    """
+    sub_q: asyncio.Queue = asyncio.Queue(maxsize=200)
+    _sse_subscribers.add(sub_q)
+
+    async def generate() -> AsyncGenerator[str, None]:
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    event = await asyncio.wait_for(sub_q.get(), timeout=20.0)
+                    yield f"data: {json.dumps(event)}\n\n"
+                except asyncio.TimeoutError:
+                    # Send a keepalive comment so the connection stays open
+                    yield ": keepalive\n\n"
+        finally:
+            _sse_subscribers.discard(sub_q)
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",   # disable nginx buffering
+        },
+    )
+
+
+# ── Streaming Tracked Repositories Management ──────────────────────────────
+class StreamingRepoRequest(BaseModel):
+    repo: str = Field(..., description="GitHub repository shorthand (owner/name) or full URL")
+
+
+def _clean_repo_name(raw: str) -> str:
+    cleaned = raw.strip().rstrip("/")
+    if cleaned.startswith("https://github.com/"):
+        cleaned = cleaned[len("https://github.com/"):]
+    elif cleaned.startswith("http://github.com/"):
+        cleaned = cleaned[len("http://github.com/"):]
+    elif cleaned.startswith("git@github.com:"):
+        cleaned = cleaned[len("git@github.com:"):]
+    if cleaned.endswith(".git"):
+        cleaned = cleaned[:-4]
+    parts = cleaned.strip("/").split("/")
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        raise ValueError(f"Invalid repository format '{raw}'. Expected 'owner/repo'.")
+    return f"{parts[0]}/{parts[1]}"
+
+
+@app.get("/streaming/repos")
+async def get_streaming_repos():
+    """Returns list of repositories currently tracked by the live streaming Kafka pipeline."""
+    p = await pool()
+    try:
+        rows = await p.fetch("SELECT repo FROM streaming_repos ORDER BY created_at ASC")
+        repos = [r["repo"] for r in rows]
+        if repos:
+            return repos
+    except Exception:
+        pass
+
+    try:
+        rows = await p.fetch("SELECT full_name FROM repositories ORDER BY synced_at DESC LIMIT 3")
+        return [r["full_name"] for r in rows] if rows else ["torvalds/linux"]
+    except Exception:
+        return ["torvalds/linux"]
+
+
+@app.post("/streaming/repos")
+async def add_streaming_repo(req: StreamingRepoRequest):
+    """Add a repository to the live streaming Kafka pipeline."""
+    try:
+        repo = _clean_repo_name(req.repo)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+    p = await pool()
+    await p.execute(
+        """
+        INSERT INTO streaming_repos (repo)
+        VALUES ($1)
+        ON CONFLICT (repo) DO NOTHING
+        """,
+        repo,
+    )
+    rows = await p.fetch("SELECT repo FROM streaming_repos ORDER BY created_at ASC")
+    return {"status": "ok", "tracked_repos": [r["repo"] for r in rows]}
+
+
+@app.delete("/streaming/repos/{owner}/{name}")
+async def delete_streaming_repo(owner: str, name: str):
+    """Remove a repository from the live streaming Kafka pipeline."""
+    repo = f"{owner}/{name}"
+    p = await pool()
+    await p.execute("DELETE FROM streaming_repos WHERE repo = $1", repo)
+    rows = await p.fetch("SELECT repo FROM streaming_repos ORDER BY created_at ASC")
+    return {"status": "ok", "tracked_repos": [r["repo"] for r in rows]}

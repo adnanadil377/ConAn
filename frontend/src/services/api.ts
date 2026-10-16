@@ -152,3 +152,31 @@ export async function fetchCommitAuthors(
   return res.json()
 }
 
+export async function fetchStreamingRepos(): Promise<string[]> {
+  const res = await fetch(`${API_BASE}/streaming/repos`)
+  if (!res.ok) throw new Error('Failed to fetch streaming repositories')
+  return res.json()
+}
+
+export async function addStreamingRepo(repo: string): Promise<{ status: string; tracked_repos: string[] }> {
+  const res = await fetch(`${API_BASE}/streaming/repos`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ repo }),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Failed to add repository' }))
+    throw new Error(err.detail || 'Failed to add repository')
+  }
+  return res.json()
+}
+
+export async function removeStreamingRepo(repo: string): Promise<{ status: string; tracked_repos: string[] }> {
+  const [owner, name] = repo.split('/')
+  const res = await fetch(`${API_BASE}/streaming/repos/${owner}/${name}`, {
+    method: 'DELETE',
+  })
+  if (!res.ok) throw new Error(`Failed to remove repository ${repo}`)
+  return res.json()
+}
+

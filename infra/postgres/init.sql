@@ -163,3 +163,11 @@ CREATE INDEX IF NOT EXISTS idx_ingestion_jobs_repo ON ingestion_jobs (repo_owner
 CREATE INDEX IF NOT EXISTS idx_commit_stats_period ON commit_stats (repo_id, period DESC);
 CREATE INDEX IF NOT EXISTS idx_collab_edges_weight ON collaboration_edges (repo_id, weight DESC);
 CREATE INDEX IF NOT EXISTS idx_bus_factor_repo ON bus_factor (repo_id, top_owner_pct DESC);
+
+-- ──────────────────────────────────────────────────────────
+-- Streaming Tracked Repositories (dynamically managed from dashboard)
+-- ──────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS streaming_repos (
+    repo        TEXT PRIMARY KEY,
+    created_at  TIMESTAMPTZ DEFAULT NOW()
+);
