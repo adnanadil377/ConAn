@@ -102,66 +102,24 @@ If user dashboard queries triggered ad-hoc Spark jobs across raw files, page loa
 
 ```mermaid
 
+
 flowchart TD
-    subgraph INGESTION["1. INGESTION & DATA SOURCES"]
-        GH["GitHub Repositories\n(Git Protocol / HTTP)"]
-        GH_EVT["GitHub Events API\n/repos/:owner/:name/events"]
-        CLONE["Blobless Git Clone Engine\n(--no-checkout, full history)"]
-        K_PROD["Kafka Producer Daemon\n(Conditional ETag Poller)"]
-        GH -->| "blobless clone" | CLONE
-        GH_EVT -->| "HTTP 304 / 200 JSON" | K_PROD
-    end
+    GH["GitHub Repositories"] --> CLONE["Blobless Git Clone"]
+    GH_EVT["GitHub Events API"] --> K_PROD["Kafka Producer"]
+    K_PROD --> KAFKA["Kafka Broker"]
+    CLONE --> HDFS_RAW["HDFS Raw Storage"]
+    KAFKA --> K_CONS["Kafka Consumer"]
+    HDFS_RAW --> COMMIT_ETL["Spark Commit ETL"]
+    COMMIT_ETL --> HDFS_ICE["Iceberg Tables"]
+    HDFS_ICE --> GRAPH_ETL["Spark Graph Analytics"]
+    GRAPH_ETL --> PG["PostgreSQL"]
+    CLONE --> PY_ENGINE["FastAPI Analytics"]
+    PY_ENGINE --> PG
+    PG --> API["FastAPI Backend"]
+    K_CONS --> API
+    API --> WEB["React Web Application"]
+    WEB --> D3["D3 Network Graph"]
 
-    subgraph BUFFER_STORAGE["2. DISTRIBUTED STORAGE & BUFFERING LAYER"]
-        KAFKA["Apache Kafka Broker\nTopic: github.events.raw"]
-        HDFS_RAW[("HDFS /raw/git_events/\ncommits.parquet (Snappy)\nlive_*.parquet")]
-        HDFS_ICE[("HDFS /warehouse/data/\nApache Iceberg Tables\ncommits, contributor_stats,\ncommit_types, collab_edges,\ngraph_metrics")]
-        HDFS_JARS[("HDFS /jars/\nAssembly Fat JAR")]
-        K_PROD -->| "publish PushEvents" | KAFKA
-        CLONE -->| "PyArrow Parquet stream" | HDFS_RAW
-    end
-
-    subgraph COMPUTE["3. DISTRIBUTED COMPUTE & ANALYTICS"]
-        SPARK_MASTER["Apache Spark Master\nRPC: 7077 / Web UI: 8080"]
-        SPARK_WORKER["Spark Worker Node\n2 Cores / 2 GB RAM"]
-        COMMIT_ETL["CommitETL Batch Job\nDeduplication & Taxonomy"]
-        GRAPH_ETL["GraphAnalytics Job\nSpark GraphX PageRank"]
-        PY_ENGINE["FastAPI Analytics Engine\nShannon Entropy, Bus Factor"]
-
-        SPARK_MASTER --- SPARK_WORKER
-        HDFS_RAW -->| "read raw Parquet" | COMMIT_ETL
-        COMMIT_ETL -->| "write ACID tables" | HDFS_ICE
-        HDFS_ICE -->| "read commits table" | GRAPH_ETL
-        GRAPH_ETL -->| "write graph metrics" | HDFS_ICE
-        CLONE -->| "in-memory stream" | PY_ENGINE
-    end
-
-    subgraph SERVING["4. SERVING & APPLICATION LAYER"]
-        PG[("PostgreSQL 15\nServing DB\nrepositories, contributors,\ncommit_stats, commit_types,\nhealth_scores, bus_factor,\ncollaboration_edges, ingestion_jobs,\nstreaming_repos")]
-        API["FastAPI Backend Engine\nREST: 8000 + SSE"]
-        K_CONS["Kafka Consumer & SSE Bridge\nfastapi-sse-consumer"]
-        DOCKER["Docker Engine Socket\n/var/run/docker.sock"]
-
-        PY_ENGINE -->| "upsert pre-aggregated metrics" | PG
-        API -->| "asyncpg pool, under 25 ms" | PG
-        API -->| "trigger spark-submit" | DOCKER
-        DOCKER -->| "exec container command" | SPARK_MASTER
-        KAFKA -->| "consume live stream" | K_CONS
-        K_CONS -->| "fan-out events" | API
-        K_CONS -->| "flush micro-batch shards" | HDFS_RAW
-    end
-
-    subgraph CLIENT["5. USER INTERFACE LAYER"]
-        WEB["React 19 + TypeScript + Vite\nWeb Application: 3000"]
-        D3["Interactive D3.js Network\nForce Simulation Graph"]
-        INFRA["Infrastructure Monitor\nHDFS & Spark Cluster Telemetry"]
-        SSE_CLI["EventSource Client\nLive Push Stream"]
-
-        WEB -->| "REST API calls" | API
-        API -->| "SSE /realtime/events" | SSE_CLI
-        WEB --- D3
-        WEB --- INFRA
-    end
 
 ```
 
