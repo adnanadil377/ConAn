@@ -460,49 +460,58 @@ To understand how these technologies synchronize, let us trace the three primary
 ### 4.1 Path A: Batch Repository Ingestion Flow
 
 ```mermaid
+
 sequenceDiagram
     autonumber
     actor User as User / Engineer
-    participant UI as React Frontend (:3000)
-    participant API as FastAPI (:8000)
-    participant Git as Git Smart Protocol
-    participant HDFS as Hadoop NameNode (:9000)
-    participant PG as PostgreSQL (:5432)
+    participant UI as React Frontend
+    participant API as FastAPI
+    participant Git as Git Protocol
+    participant HDFS as Hadoop HDFS
+    participant PG as PostgreSQL
     participant Docker as Docker Engine
-    participant Spark as Spark Master (:7077)
+    participant Spark as Spark Cluster
     participant Iceberg as Iceberg Lakehouse
 
-    User->>UI: Enters "expressjs/express" & clicks "Start Ingestion"
-    UI->>API: POST /repos/ingest {"repo_url": "expressjs/express"}
-    API->>PG: INSERT INTO ingestion_jobs (id, status='queued')
-    API-->>UI: 202 Accepted {"job_id": "uuid", "status": "queued"}
-    
-    UI->>API: Polls GET /repos/jobs/{uuid} every 1s
-    
-    API->>Git: git clone --single-branch --no-checkout expressjs/express
-    Git-->>API: Ephemeral repository directory created
-    API->>PG: UPDATE ingestion_jobs status='extracting' (30%)
-    
-    API->>Git: git log --pretty=format:%H%ae... --numstat
-    Git-->>API: Stream commits, file diffs, and author pairs
-    API->>PG: UPDATE ingestion_jobs status='hdfs_write' (55%)
-    
-    API->>API: PyArrow converts commits to snappy-compressed Parquet
-    API->>HDFS: WebHDFS PUT /raw/git_events/repository=expressjs__express/commits.parquet
-    HDFS-->>API: Write confirmed (DataNode block stored)
-    
-    API->>PG: UPDATE ingestion_jobs status='analytics' (75%)
-    API->>API: Compute Shannon entropy, CV, bus factor, co-authorship pairs
-    API->>PG: UPSERT repositories, contributors, commit_stats, health_scores, bus_factor, collaboration_edges
-    
-    API->>PG: UPDATE ingestion_jobs status='spark_etl' (90%)
-    API->>Docker: exec spark-master: spark-submit --class analytics.CommitETL
-    Docker->>Spark: Run CommitETL on cluster
-    Spark->>HDFS: Read raw Parquet from /raw/git_events/
-    Spark->>Iceberg: Write deduplicated tables lakehouse.github.commits
-    
-    API->>PG: UPDATE ingestion_jobs status='completed' (100%)
-    UI-->>User: Progress hits 100%; dashboard renders Express.js analytics!
+    User->>UI: Enter repository and click Start Ingestion
+    UI->>API: POST /repos/ingest
+    Note right of API: repo_url is expressjs/express
+
+    API->>PG: Create ingestion job with queued status
+    API-->>UI: Return job_id with 202 Accepted
+
+    loop Every 1 second
+        UI->>API: GET /repos/jobs/{uuid}
+        API-->>UI: Return job status and progress
+    end
+
+    API->>Git: Clone repository without checkout
+    Git-->>API: Create temporary repository directory
+    API->>PG: Update job status to extracting
+
+    API->>Git: Read commit metadata and file statistics
+    Git-->>API: Stream commits and file changes
+    API->>PG: Update job status to hdfs_write
+
+    API->>API: Convert commit records to Snappy Parquet
+    API->>HDFS: Write raw Git events to HDFS
+    Note right of HDFS: raw/git_events/repository=expressjs__express/commits.parquet
+    HDFS-->>API: Confirm successful write
+
+    API->>PG: Update job status to analytics
+    API->>API: Calculate entropy, CV, bus factor and collaboration
+    API->>PG: Upsert repository and contributor analytics
+
+    API->>PG: Update job status to spark_etl
+    API->>Docker: Execute spark-submit
+    Docker->>Spark: Start CommitETL
+    Spark->>HDFS: Read raw Parquet files
+    HDFS-->>Spark: Return Git event data
+    Spark->>Iceberg: Write deduplicated commits
+    Iceberg-->>Spark: Confirm successful commit
+
+    API->>PG: Update job status to completed
+    UI-->>User: Display completed ingestion and Express.js analytics
 ```
 
 ---
