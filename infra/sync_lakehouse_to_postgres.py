@@ -5,6 +5,7 @@ Sync aggregated analytics from HDFS raw / lakehouse Parquet directly into Postgr
   - contributors
   - commit_stats
   - commit_types
+  - commits
 """
 import io
 import os
@@ -180,6 +181,48 @@ def sync_repo(repo_full_name: str):
         type_records,
     )
     print(f"  ✓ {len(type_records)} Commit type records synced")
+
+    # 5. Full commit history
+    commit_records = []
+    for _, row in df.iterrows():
+        a_date = pd.to_datetime(row["author_date"], utc=True) if pd.notnull(row.get("author_date")) else None
+        c_date = pd.to_datetime(row["committer_date"], utc=True) if pd.notnull(row.get("committer_date")) else a_date
+        commit_records.append((
+            repo_id,
+            str(row["hash"]),
+            str(row.get("author_name") or "Unknown")[:255],
+            str(row.get("author_email") or "")[:255] if row.get("author_email") else None,
+            c_date,
+            a_date,
+            str(row.get("subject") or "")[:1000],
+            str(row.get("commit_type") or "OTHER"),
+            int(row.get("insertions") or 0),
+            int(row.get("deletions") or 0),
+            int(row.get("files_changed") or 0),
+        ))
+
+    CHUNK = 5000
+    for offset in range(0, len(commit_records), CHUNK):
+        batch = commit_records[offset:offset + CHUNK]
+        execute_values(
+            cur,
+            """
+            INSERT INTO commits (
+                repo_id, hash, author_name, author_email,
+                committer_date, author_date, subject, commit_type,
+                insertions, deletions, files_changed
+            )
+            VALUES %s
+            ON CONFLICT (repo_id, hash) DO UPDATE
+            SET commit_type   = EXCLUDED.commit_type,
+                insertions    = EXCLUDED.insertions,
+                deletions     = EXCLUDED.deletions,
+                files_changed = EXCLUDED.files_changed;
+            """,
+            batch,
+            page_size=CHUNK,
+        )
+    print(f"  ✓ {len(commit_records)} Commit history records synced")
 
     conn.commit()
     cur.close()
