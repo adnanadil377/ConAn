@@ -2,7 +2,8 @@
 
 A full-stack big data analytics platform for GitHub repository contribution patterns, built on **HDFS + Apache Spark + Apache Iceberg + PostgreSQL**.
 
-> 📖 **Full Architectural & Systems Specification**: See [docs/PROJECT_ARCHITECTURE_AND_ROADMAP.md](file:///Users/adnan/Documents/bigdata-pro/docs/PROJECT_ARCHITECTURE_AND_ROADMAP.md) for an in-depth guide detailing how every technology works under the hood, their exact project roles, end-to-end data flows, mathematical formulations, and data schemas.
+> 📖 **Full Architectural & Systems Specification**: See [docs/PROJECT_ARCHITECTURE_AND_ROADMAP.md](file:///Users/adnan/Documents/bigdata-pro/docs/PROJECT_ARCHITECTURE_AND_ROADMAP.md) for an in-depth guide detailing how every technology works under the hood, their exact project roles, end-to-end data flows, mathematical formulations, and data schemas.  
+> 📑 **Final Project Report**: See [docs/PROJECT_REPORT.md](file:///Users/adnan/Documents/bigdata-pro/docs/PROJECT_REPORT.md) for the complete academic/engineering report covering system architecture, tool-by-tool justification, empirical results, engineering challenges, and team contribution breakdown.
 
 ## Architecture
 
