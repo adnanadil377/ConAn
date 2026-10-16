@@ -500,54 +500,11 @@ def sync_analytics_to_postgres(
                 type_records,
             )
 
-        # 4b. Full Commit History Table ───────────────────────────────────
-        commit_records = []
-        for _, row in df.iterrows():
-            a_date = row.get("author_date_dt")
-            if pd.isnull(a_date):
-                a_date = None
-            c_date = row.get("committer_date")
-            try:
-                c_date = pd.to_datetime(c_date, utc=True) if pd.notnull(c_date) else a_date
-            except Exception:
-                c_date = a_date
-
-            commit_records.append((
-                repo_id,
-                str(row["hash"]),
-                str(row.get("author_name") or "Unknown")[:255],
-                str(row.get("author_email") or "")[:255] if row.get("author_email") else None,
-                c_date,
-                a_date,
-                str(row.get("subject") or "")[:1000],
-                str(row.get("commit_type") or "OTHER"),
-                int(row.get("insertions") or 0),
-                int(row.get("deletions") or 0),
-                int(row.get("files_changed") or 0),
-            ))
-
-        if commit_records:
-            CHUNK = 5000
-            for offset in range(0, len(commit_records), CHUNK):
-                batch = commit_records[offset:offset + CHUNK]
-                execute_values(
-                    cur,
-                    """
-                    INSERT INTO commits (
-                        repo_id, hash, author_name, author_email,
-                        committer_date, author_date, subject, commit_type,
-                        insertions, deletions, files_changed
-                    )
-                    VALUES %s
-                    ON CONFLICT (repo_id, hash) DO UPDATE
-                    SET commit_type   = EXCLUDED.commit_type,
-                        insertions    = EXCLUDED.insertions,
-                        deletions     = EXCLUDED.deletions,
-                        files_changed = EXCLUDED.files_changed;
-                    """,
-                    batch,
-                    page_size=CHUNK,
-                )
+        # NOTE: Full commit history is stored exclusively in HDFS Parquet
+        # (hdfs://namenode:9000/raw/git_events/repository=.../commits.parquet).
+        # Writing every commit row into PostgreSQL would duplicate that data
+        # unnecessarily for large repos (50k–200k+ commits). The /commits API
+        # endpoint reads directly from HDFS Parquet as its primary source.
 
         # 5. Project Health Score ─────────────────────────────────────────
         total_commits = len(commits)

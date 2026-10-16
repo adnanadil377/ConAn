@@ -435,6 +435,8 @@ async def delete_repo(owner: str, name: str):
     repo_id = repo["id"]
     async with p.acquire() as conn:
         async with conn.transaction():
+            # commits table is no longer populated (HDFS Parquet is canonical);
+            # this delete is kept for backward compat with pre-migration data.
             await conn.execute("DELETE FROM commits WHERE repo_id = $1", repo_id)
             await conn.execute("DELETE FROM commit_stats WHERE repo_id = $1", repo_id)
             await conn.execute("DELETE FROM commit_types WHERE repo_id = $1", repo_id)
@@ -664,6 +666,9 @@ async def get_commits(
     """
     Returns paginated commit history with support for lazy loading,
     author filtering, taxonomy classification filtering, and keyword search.
+
+    Primary source: HDFS Parquet (hdfs://namenode:9000/raw/git_events/.../commits.parquet)
+    Fallback:       PostgreSQL commits table (legacy rows from pre-migration ingestions)
     """
     p = await pool()
     repo = await p.fetchrow(
@@ -675,71 +680,7 @@ async def get_commits(
     repo_id = repo["id"]
     sort_dir = "ASC" if sort.lower() == "asc" else "DESC"
 
-    # 1. Query indexed PostgreSQL commits table
-    db_count = await p.fetchval("SELECT count(*) FROM commits WHERE repo_id=$1", repo_id)
-
-    if db_count and db_count > 0:
-        conditions = ["repo_id = $1"]
-        params: list[Any] = [repo_id]
-
-        if author and author.strip():
-            params.append(f"%{author.strip()}%")
-            conditions.append(f"(author_name ILIKE ${len(params)} OR author_email ILIKE ${len(params)})")
-
-        if commit_type and commit_type.strip().upper() not in ("ALL", ""):
-            params.append(commit_type.strip().upper())
-            conditions.append(f"commit_type = ${len(params)}")
-
-        if search and search.strip():
-            s = f"%{search.strip()}%"
-            params.append(s)
-            conditions.append(f"(subject ILIKE ${len(params)} OR hash ILIKE ${len(params)} OR author_name ILIKE ${len(params)})")
-
-        where_clause = " AND ".join(conditions)
-        total_matching = await p.fetchval(f"SELECT count(*) FROM commits WHERE {where_clause}", *params)
-
-        offset = (page - 1) * limit
-        page_params = list(params)
-        page_params.extend([limit, offset])
-
-        rows = await p.fetch(
-            f"""
-            SELECT hash, author_name, author_email, author_date, subject,
-                   commit_type, insertions, deletions, files_changed
-            FROM commits
-            WHERE {where_clause}
-            ORDER BY author_date {sort_dir} NULLS LAST, id {sort_dir}
-            LIMIT ${len(page_params)-1} OFFSET ${len(page_params)}
-            """,
-            *page_params,
-        )
-
-        commits_data = [
-            {
-                "hash": r["hash"],
-                "author_name": r["author_name"],
-                "author_email": r["author_email"],
-                "author_date": r["author_date"].isoformat() if r["author_date"] else None,
-                "subject": r["subject"],
-                "commit_type": r["commit_type"] or "OTHER",
-                "insertions": int(r["insertions"] or 0),
-                "deletions": int(r["deletions"] or 0),
-                "files_changed": int(r["files_changed"] or 0),
-            }
-            for r in rows
-        ]
-
-        total_pages = math.ceil(total_matching / limit) if total_matching > 0 else 1
-        return {
-            "total": total_matching,
-            "page": page,
-            "limit": limit,
-            "total_pages": total_pages,
-            "has_more": (page * limit) < total_matching,
-            "commits": commits_data,
-        }
-
-    # 2. Fallback: Query directly from HDFS Parquet lakehouse
+    # 1. Primary: Query directly from HDFS Parquet (canonical big-data store)
     table = get_hdfs_parquet_table(owner, name)
     if table is not None:
         mask = None
@@ -814,6 +755,65 @@ async def get_commits(
             "commits": commits_data,
         }
 
+    # 2. Fallback: PostgreSQL commits table (legacy repos ingested before HDFS-primary migration)
+    conditions = ["repo_id = $1"]
+    params: list[Any] = [repo_id]
+
+    if author and author.strip():
+        params.append(f"%{author.strip()}%")
+        conditions.append(f"(author_name ILIKE ${len(params)} OR author_email ILIKE ${len(params)})")
+
+    if commit_type and commit_type.strip().upper() not in ("ALL", ""):
+        params.append(commit_type.strip().upper())
+        conditions.append(f"commit_type = ${len(params)}")
+
+    if search and search.strip():
+        s = f"%{search.strip()}%"
+        params.append(s)
+        conditions.append(f"(subject ILIKE ${len(params)} OR hash ILIKE ${len(params)} OR author_name ILIKE ${len(params)})")
+
+    where_clause = " AND ".join(conditions)
+    total_matching = await p.fetchval(f"SELECT count(*) FROM commits WHERE {where_clause}", *params)
+
+    if total_matching and total_matching > 0:
+        offset = (page - 1) * limit
+        page_params = list(params)
+        page_params.extend([limit, offset])
+        rows = await p.fetch(
+            f"""
+            SELECT hash, author_name, author_email, author_date, subject,
+                   commit_type, insertions, deletions, files_changed
+            FROM commits
+            WHERE {where_clause}
+            ORDER BY author_date {sort_dir} NULLS LAST, id {sort_dir}
+            LIMIT ${len(page_params)-1} OFFSET ${len(page_params)}
+            """,
+            *page_params,
+        )
+        commits_data = [
+            {
+                "hash": r["hash"],
+                "author_name": r["author_name"],
+                "author_email": r["author_email"],
+                "author_date": r["author_date"].isoformat() if r["author_date"] else None,
+                "subject": r["subject"],
+                "commit_type": r["commit_type"] or "OTHER",
+                "insertions": int(r["insertions"] or 0),
+                "deletions": int(r["deletions"] or 0),
+                "files_changed": int(r["files_changed"] or 0),
+            }
+            for r in rows
+        ]
+        total_pages = math.ceil(total_matching / limit) if total_matching > 0 else 1
+        return {
+            "total": total_matching,
+            "page": page,
+            "limit": limit,
+            "total_pages": total_pages,
+            "has_more": (page * limit) < total_matching,
+            "commits": commits_data,
+        }
+
     return {
         "total": 0,
         "page": page,
@@ -843,35 +843,31 @@ async def get_commit_authors(
     repo_id = repo["id"]
     q_filter = f"%{q.strip()}%" if q and q.strip() else None
 
-    # Check commits table first
-    db_count = await p.fetchval("SELECT count(*) FROM commits WHERE repo_id=$1", repo_id)
-    if db_count and db_count > 0:
-        if q_filter:
-            rows = await p.fetch(
-                """
-                SELECT author_name AS name, author_email AS email, count(*) AS commit_count
-                FROM commits
-                WHERE repo_id = $1 AND (author_name ILIKE $2 OR author_email ILIKE $2)
-                GROUP BY author_name, author_email
-                ORDER BY commit_count DESC
-                LIMIT $3
-                """,
-                repo_id, q_filter, limit,
-            )
-        else:
-            rows = await p.fetch(
-                """
-                SELECT author_name AS name, author_email AS email, count(*) AS commit_count
-                FROM commits
-                WHERE repo_id = $1
-                GROUP BY author_name, author_email
-                ORDER BY commit_count DESC
-                LIMIT $2
-                """,
-                repo_id, limit,
-            )
-        return [dict(r) for r in rows]
+    # 1. Primary: query authors from HDFS Parquet (canonical commit store)
+    table = get_hdfs_parquet_table(owner, name)
+    if table is not None:
+        import pyarrow.compute as _pc
+        names = table["author_name"].to_pylist()
+        emails = table["author_email"].to_pylist() if "author_email" in table.column_names else [None] * len(names)
+        from collections import Counter
+        author_counts: dict[tuple, int] = Counter()
+        for n, e in zip(names, emails):
+            key = (str(n or "Unknown"), str(e) if e else None)
+            author_counts[key] += 1
 
+        results = [
+            {"name": name, "email": email, "commit_count": count}
+            for (name, email), count in sorted(author_counts.items(), key=lambda x: -x[1])
+        ]
+        if q_filter:
+            q_lower = q.strip().lower()
+            results = [
+                r for r in results
+                if q_lower in (r["name"] or "").lower() or q_lower in (r["email"] or "").lower()
+            ]
+        return results[:limit]
+
+    # 2. Fallback: contributors + commit_stats tables (legacy pre-migration data)
     # Query from contributors + commit_stats
     if q_filter:
         rows = await p.fetch(
