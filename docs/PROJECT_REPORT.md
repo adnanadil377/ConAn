@@ -478,7 +478,9 @@ $$\text{Score}_{\text{consistency}} = \frac{1.0}{1.0 + \frac{\sigma_{\text{month
 - Verified smooth velocity patterns for mature repositories, penalizing sporadic projects exhibiting multi-month inactivity.
 
 #### 3. Module Bus Factor Risk Detection
-$$\text{BusFactor}(M) = \min \left\{ k : \sum_{i=1}^{k} c_i \ge 0.50 \cdot C_{\text{module}} \right\}$$
+$$
+\text{BusFactor}(M) = \min \{ k \mid \sum_{i=1}^{k} c_i \geq 0.50 \cdot C_{\text{module}} \}
+$$
 - In `expressjs/express`, modules like `lib/router` and `lib/request.js` were correctly flagged with $\text{BusFactor} = 1$, where a single maintainer authored >60% of all changes. The dashboard successfully triggered automated high-priority risk badges for these critical paths.
 
 ---
