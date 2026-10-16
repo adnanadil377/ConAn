@@ -192,39 +192,6 @@ services:
     ports:
       - "8081:8081"
 
-  # ── Hive Metastore (Optional — launch with: docker compose --profile metastore up) ──
-  hive-metastore-db:
-    image: postgres:15
-    container_name: hive-metastore-db
-    profiles: ["metastore"]
-    environment:
-      POSTGRES_DB: metastore
-      POSTGRES_USER: hive
-      POSTGRES_PASSWORD: hive
-    volumes:
-      - hive-meta-data:/var/lib/postgresql/data
-    networks:
-      - lakehouse
-
-  hive-metastore:
-    image: apache/hive:4.0.0
-    container_name: hive-metastore
-    profiles: ["metastore"]
-    depends_on:
-      - hive-metastore-db
-    environment:
-      SERVICE_NAME: metastore
-      DB_DRIVER: postgres
-      SERVICE_OPTS: >-
-        -Djavax.jdo.option.ConnectionDriverName=org.postgresql.Driver
-        -Djavax.jdo.option.ConnectionURL=jdbc:postgresql://hive-metastore-db:5432/metastore
-        -Djavax.jdo.option.ConnectionUserName=hive
-        -Djavax.jdo.option.ConnectionPassword=hive
-    ports:
-      - "9083:9083"
-    networks:
-      - lakehouse
-
   # ── Serving Database ──────────────────────────────────────────────────────
   postgres:
     image: postgres:15
@@ -301,7 +268,6 @@ volumes:
   hdfs-name:
   hdfs-data:
   postgres-data:
-  hive-meta-data:
   spark-ivy-cache:   # Persists Ivy/Maven packages downloaded by spark --packages
 
 # ── Networks ───────────────────────────────────────────────────────────────
