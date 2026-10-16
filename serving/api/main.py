@@ -357,6 +357,7 @@ async def delete_repo(owner: str, name: str):
     repo_id = repo["id"]
     async with p.acquire() as conn:
         async with conn.transaction():
+            await conn.execute("DELETE FROM commits WHERE repo_id = $1", repo_id)
             await conn.execute("DELETE FROM commit_stats WHERE repo_id = $1", repo_id)
             await conn.execute("DELETE FROM commit_types WHERE repo_id = $1", repo_id)
             await conn.execute("DELETE FROM health_scores WHERE repo_id = $1", repo_id)
@@ -688,6 +689,10 @@ async def get_commits(
             filtered_table = table.filter(mask)
         else:
             filtered_table = table
+
+        if sort.lower() == "asc" and "author_date" in filtered_table.column_names:
+            indices = pc.sort_indices(filtered_table, sort_keys=[("author_date", "ascending")])
+            filtered_table = filtered_table.take(indices)
 
         total_matching = len(filtered_table)
         offset = (page - 1) * limit
