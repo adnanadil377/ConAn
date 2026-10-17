@@ -1,4 +1,4 @@
-# GitHub Contribution Analytics — Big Data Lakehouse
+# ConAn : Contribution Analytics Lakehouse for Github
 
 [![Hadoop HDFS](https://img.shields.io/badge/Storage-Apache%20Hadoop%20HDFS%203.3.6-red?logo=apachehadoop&logoColor=white)](https://hadoop.apache.org/)
 [![Apache Spark](https://img.shields.io/badge/Compute-Apache%20Spark%203.5.3-E25A1C?logo=apachespark&logoColor=white)](https://spark.apache.org/)
