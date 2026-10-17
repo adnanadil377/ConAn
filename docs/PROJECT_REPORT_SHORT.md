@@ -97,9 +97,10 @@ Ingestion coordinates a non-blocking 6-stage lifecycle tracked by UUID in Postgr
 
 ### 2.4 Real-Time Streaming Path
 - **Producer**: Queries `/repos/{owner}/{name}/events` every 30s with `If-None-Match` (ETag). Unchanged states return HTTP 304 with zero rate-limit penalty.
-- **Consumer**: Group `fastapi-sse-consumer` executes dual consumption:
+- **Consumer**: Group `fastapi-sse-consumer` executes multi-tier event consumption:
   1. Fans out commit payloads to an in-memory `asyncio.Queue` streamed to browsers via Server-Sent Events (SSE).
   2. Buffers commits in memory and flushes timestamped Parquet shards (`live_*.parquet`) to HDFS when threshold is reached (**$\ge 20$ commits or $60$ seconds**), preventing HDFS NameNode small-file exhaustion.
+  3. Increments pre-aggregated summary rollups in PostgreSQL (`commit_types`, `contributors`, and repo sync timestamps), writing zero raw commits to PostgreSQL.
 
 ---
 

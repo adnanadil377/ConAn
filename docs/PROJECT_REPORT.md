@@ -497,8 +497,9 @@ $$
 - **The Challenge**: During early architectural iterations, the pipeline attempted to write every parsed Git commit row directly into the PostgreSQL `commits` table in addition to writing Parquet files to storage. When ingesting repositories with 50,000 to 100,000+ commits, PostgreSQL experienced severe write amplification. Disk I/O saturated, write-ahead logs (WAL) ballooned by gigabytes, and transaction timeouts caused job failures.
 - **The Solution**: Redesigned the data architecture to enforce strict separation:
   1. HDFS Snappy Parquet was designated as the **exclusive canonical store for raw commit records** (`hdfs://namenode:9000/raw/git_events/.../commits.parquet`).
-  2. PostgreSQL write operations were restricted strictly to **pre-aggregated summary statistics** (`commit_stats`, `commit_types`, `health_scores`, `bus_factor`, and `collaboration_edges`).
+  2. PostgreSQL write operations were restricted strictly to **pre-aggregated summary statistics** (`commit_stats`, `commit_types`, `health_scores`, `bus_factor`, `graph_metrics`, and `collaboration_edges`).
   3. The paginated `/repos/{owner}/{name}/commits` API endpoint was re-engineered to stream commit records directly from HDFS Parquet into Python memory using PyArrow's zero-copy reader. This reduced database ingestion times by over **85%** and eliminated transaction locks entirely.
+  4. Extended this strict separation to the real-time streaming consumer (`kafka_consumer.py`): live push events update only summary tables (`commit_types`, `contributors`, and repo sync timestamps) in PostgreSQL, while raw commits are buffered into timestamped micro-batch Parquet shards on HDFS (`live_<timestamp>.parquet`). Zero raw commits are written to PostgreSQL in either pipeline.
 
 ---
 
@@ -517,7 +518,7 @@ $$
 ### 5.4 Git Memory Spikes & ASCII Unit-Separator Parsing
 - **The Challenge**: Initial ingestion scripts attempted to clone repositories with full working trees and parse commit logs using standard comma-separated or tab-separated regexes. Full clones caused multi-gigabyte downloads, while developer commit messages frequently contained commas, quotation marks, and arbitrary newlines that corrupted CSV parsers.
 - **The Solution**: 
-  1. Implemented **blobless cloning** (`git clone --single-branch --no-checkout`), which downloads only Git commit DAG objects and tree nodes, shrinking repository download footprints by up to 95%.
+  1. Implemented **blobless cloning** (`git clone --filter=blob:none --single-branch --no-checkout`), which downloads only Git commit DAG objects and tree nodes, shrinking repository download footprints by up to 95%.
   2. Implemented the **ASCII Unit Separator (`\x1f`, byte 31)** as the column delimiter in `git log --pretty=format:...`. Because this control character is never entered in standard human text or commit subjects, parsing ambiguity was reduced to zero.
 
 ---

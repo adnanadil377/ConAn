@@ -65,7 +65,11 @@ CREATE TABLE IF NOT EXISTS commit_types (
 );
 
 -- ──────────────────────────────────────────────────────────
--- Full Commit History (indexed for lazy loading & search)
+-- Full Commit History (Legacy Migration Fallback)
+-- Note: Raw commits reside exclusively in HDFS Snappy Parquet across both
+-- batch (pipeline.py) and streaming (kafka_consumer.py) paths. PostgreSQL
+-- exclusively stores pre-aggregated summaries. This table is preserved only
+-- as an optional query fallback for pre-migration repositories.
 -- ──────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS commits (
     id              BIGSERIAL PRIMARY KEY,

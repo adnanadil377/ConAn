@@ -142,47 +142,69 @@ async def _get_or_create_repo(conn: asyncpg.Connection, owner: str, name: str) -
     return row["id"]
 
 
-async def _upsert_commit(
+async def _update_streaming_summaries(
     conn: asyncpg.Connection,
     repo_id: int,
     commit: dict[str, Any],
 ) -> None:
-    sha          = commit.get("sha") or commit.get("hash") or ""
+    """
+    Update PostgreSQL analytical summary rollups (commit_types, contributors, repo synced_at).
+    Does NOT store raw commits in PostgreSQL, enforcing zero double-writing and guaranteeing
+    that all raw commit data resides strictly in HDFS Parquet.
+    """
     author       = commit.get("author") or {}
     author_name  = author.get("name") or commit.get("author_name") or "Unknown"
     author_email = author.get("email") or commit.get("author_email") or ""
     message      = commit.get("message") or commit.get("subject") or ""
     subject      = message.splitlines()[0][:1000] if message else ""
-    committed_at = commit.get("timestamp") or commit.get("committer_date") or \
-                   commit.get("author_date") or datetime.now(timezone.utc).isoformat()
+    commit_type  = classify_subject(subject)
+    committed_at = (
+        commit.get("timestamp")
+        or commit.get("committer_date")
+        or commit.get("author_date")
+        or datetime.now(timezone.utc).isoformat()
+    )
 
     try:
-        committed_at_dt = datetime.fromisoformat(
-            committed_at.replace("Z", "+00:00")
-        )
+        dt = datetime.fromisoformat(committed_at.replace("Z", "+00:00"))
     except Exception:
-        committed_at_dt = datetime.now(timezone.utc)
+        dt = datetime.now(timezone.utc)
 
-    commit_type = classify_subject(subject)
+    period_date = dt.date().replace(day=1)
 
+    # 1. Update commit_types distribution summary
     await conn.execute(
         """
-        INSERT INTO commits
-            (repo_id, hash, author_name, author_email,
-             committer_date, author_date, subject, commit_type,
-             insertions, deletions, files_changed)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-        ON CONFLICT (repo_id, hash) DO NOTHING
+        INSERT INTO commit_types (repo_id, period, commit_type, count)
+        VALUES ($1, $2, $3, 1)
+        ON CONFLICT (repo_id, period, commit_type) DO UPDATE
+        SET count = commit_types.count + 1
         """,
         repo_id,
-        sha,
-        author_name[:255],
-        author_email[:255],
-        committed_at_dt,
-        committed_at_dt,
-        subject,
+        period_date,
         commit_type,
-        0, 0, 0,   # diff stats not available from Events API
+    )
+
+    # 2. Update contributor summary
+    login_id = (author_name.lower().replace(" ", "-") if author_name != "Unknown" else author_email) or "unknown"
+    await conn.execute(
+        """
+        INSERT INTO contributors (github_login, email, first_seen, last_seen, total_commits)
+        VALUES ($1, $2, $3, $3, 1)
+        ON CONFLICT (github_login) DO UPDATE
+        SET total_commits = contributors.total_commits + 1,
+            last_seen = GREATEST(contributors.last_seen, EXCLUDED.last_seen),
+            email = COALESCE(contributors.email, EXCLUDED.email)
+        """,
+        login_id,
+        author_email or None,
+        dt.date(),
+    )
+
+    # 3. Touch repo synced_at
+    await conn.execute(
+        "UPDATE repositories SET synced_at = NOW() WHERE id = $1",
+        repo_id,
     )
 
 
@@ -190,8 +212,9 @@ async def _upsert_commit(
 
 async def consume_kafka_events(stop_event: asyncio.Event | None = None) -> None:
     """
-    Long-running coroutine. Reads PushEvents from Kafka, upserts into
-    Postgres, buffers for HDFS, and fans-out to the live SSE queue.
+    Long-running coroutine. Reads PushEvents from Kafka, updates analytical
+    summaries in Postgres, buffers raw commits for HDFS Parquet, and fans-out
+    to the live SSE queue.
 
     Call asyncio.create_task(consume_kafka_events()) from FastAPI lifespan.
     """
@@ -293,15 +316,15 @@ async def consume_kafka_events(stop_event: asyncio.Event | None = None) -> None:
                         or datetime.now(timezone.utc).isoformat()
                     )
 
-                    # 1. Postgres upsert
+                    # 1. Postgres summary update (no raw commits double-written)
                     try:
-                        await _upsert_commit(conn, repo_id, {
+                        await _update_streaming_summaries(conn, repo_id, {
                             **commit,
                             "author_date":     committed_at,
                             "committer_date":  committed_at,
                         })
                     except Exception:
-                        logger.exception("Postgres upsert failed for %s@%s", full_name, sha[:7])
+                        logger.exception("PostgreSQL summary update failed for %s@%s", full_name, sha[:7])
 
                     # 2. Add to HDFS buffer
                     hdfs_buffers[full_name][0].append({
