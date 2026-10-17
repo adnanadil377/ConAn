@@ -164,7 +164,7 @@ stateDiagram-v2
 | State | Progress % | Actions Performed | Failure Mitigations |
 |---|---|---|---|
 | `queued` | 0% | Job row initialized in PostgreSQL with unique UUID; HTTP 202 response returned to client immediately. | Validates URL format before queuing. |
-| `cloning` | 10% | Runs `git clone --single-branch --no-checkout` into an isolated temporary directory. | Injects authentication token if provided; redacts token from error logs. |
+| `cloning` | 10% | Runs `git clone --filter=blob:none --single-branch --no-checkout` into an isolated temporary directory. | Injects authentication token if provided; redacts token from error logs. |
 | `extracting` | 30% | Runs `git log --pretty=format:... --numstat` using unit-separator `\x1f` to extract all commits and file diffs. | Memory-efficient streaming parser; handles repos with >200,000 commits. |
 | `hdfs_write` | 55% | Serializes commits into an Apache Arrow table; writes compressed Parquet to `hdfs://namenode:9000/raw/...` via WebHDFS. | Auto-creates parent directories; retries on WebHDFS connection errors. |
 | `analytics` | 75% | Computes Shannon entropy, coefficient of variation, bus factor, and developer co-editing pairs; upserts to PostgreSQL. | Batched `psycopg2.extras.execute_values` inside an isolated ACID transaction. |

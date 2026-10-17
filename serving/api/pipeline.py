@@ -139,6 +139,7 @@ def clone_repository(
     cmd = [
         "git",
         "clone",
+        "--filter=blob:none",
         "--single-branch",
         "--no-checkout",
     ]

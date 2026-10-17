@@ -89,7 +89,7 @@ flowchart TD
 ### 2.3 Asynchronous Ingestion State Machine
 Ingestion coordinates a non-blocking 6-stage lifecycle tracked by UUID in PostgreSQL:
 1. `queued` (0%): Allocates UUID, validates target URL, returns HTTP 202 Accepted immediately.
-2. `cloning` (10%): Executes blobless clone (`--single-branch --no-checkout`) into an isolated temporary directory.
+2. `cloning` (10%): Executes blobless clone (`--filter=blob:none --single-branch --no-checkout`) into an isolated temporary directory.
 3. `extracting` (30%): Streams commits and diffs via ASCII Unit-Separator (`\x1f`), processing $\sim$1,850 commits/sec.
 4. `hdfs_write` (55%): Serializes PyArrow RecordBatches to Snappy Parquet and uploads to HDFS via WebHDFS.
 5. `analytics` (75%): Computes Shannon entropy, CV consistency, bus factors, and co-authorship pairs; upserts to PostgreSQL.

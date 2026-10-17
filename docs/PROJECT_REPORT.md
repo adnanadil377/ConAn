@@ -578,7 +578,7 @@ The table below outlines the core deliverables, source code ownership, and contr
 
 #### Module 1: Ingestion Engine & HDFS Distributed Storage
 - **Technical Deliverables**:
-  - Implemented `clone_repository()` using `--single-branch --no-checkout` to guarantee zero depth limits without saturating local memory.
+  - Implemented `clone_repository()` using `--filter=blob:none --single-branch --no-checkout` to guarantee zero depth limits without saturating local memory.
   - Implemented `extract_commits()` streaming parser utilizing `GIT_LOG_FORMAT = "%H\x1f%ae\x1f%an\x1f%ce\x1f%ai\x1f%ci\x1f%P\x1f%s"`, extracting full commit metadata and per-file diff statistics.
   - Implemented `upload_commits_to_hdfs()` serializing commit dictionaries into Apache Arrow tables and streaming Snappy-compressed Parquet blocks to `hdfs://namenode:9000/raw/git_events/` via WebHDFS.
   - Engineered the `/hdfs/status` API endpoint, querying NameNode metadata to report active DataNodes, DFS disk capacity, block replication factors, and file lists.
