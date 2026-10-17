@@ -139,15 +139,17 @@ def clone_repository(
     cmd = [
         "git",
         "clone",
-        "--filter=blob:none",
         "--single-branch",
-        "--no-checkout",
+        "--no-checkout"
     ]
     if branch and branch.strip():
         cmd.extend(["-b", branch.strip()])
     cmd.extend([clone_url, target_dir])
 
-    res = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("Git clone timed out after 10 minutes — the repository may be too large or the network is slow.")
     if res.returncode != 0:
         err = sanitize_message(res.stderr, token)
         raise RuntimeError(f"Git clone failed: {err}")
@@ -188,11 +190,14 @@ def extract_commits(repo_dir: str) -> tuple[list[dict], dict[str, int], list[tup
     file_authors: list[tuple[str, str, str]] = []   # (author_name, filepath, period_month)
     current: dict | None = None
 
-    stdout = proc.stdout
-    if stdout is None:
-        raise RuntimeError("Failed to read git log output stream")
+    try:
+        stdout_data, stderr_data = proc.communicate(timeout=900)  # 15-minute hard cap
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
+        raise RuntimeError("git log timed out after 15 minutes — the repository history may be too large.")
 
-    for line in stdout:
+    for line in stdout_data.splitlines():
         parts = line.rstrip("\r\n").split("\x1f")
         if len(parts) == 8:
             if current:
@@ -230,10 +235,8 @@ def extract_commits(repo_dir: str) -> tuple[list[dict], dict[str, int], list[tup
     if current:
         commits.append(current)
 
-    proc.wait()
     if proc.returncode != 0 and not commits:
-        stderr = proc.stderr.read() if proc.stderr else ""
-        raise RuntimeError(f"git log failed: {stderr}")
+        raise RuntimeError(f"git log failed: {stderr_data}")
 
     return commits, file_mods, file_authors
 
