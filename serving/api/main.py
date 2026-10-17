@@ -22,6 +22,7 @@ Endpoints:
 from __future__ import annotations
 
 import asyncio
+from collections import defaultdict
 import io
 import json
 import logging
@@ -108,6 +109,16 @@ async def lifespan(application: FastAPI):
                 repo TEXT PRIMARY KEY,
                 created_at TIMESTAMPTZ DEFAULT NOW()
             );
+            CREATE TABLE IF NOT EXISTS graph_metrics (
+                id                 SERIAL PRIMARY KEY,
+                repo_id            INT REFERENCES repositories(id) ON DELETE CASCADE,
+                dev                TEXT NOT NULL,
+                pagerank           FLOAT DEFAULT 0.0,
+                degree_centrality  INT DEFAULT 0,
+                computed_at        TIMESTAMPTZ DEFAULT NOW(),
+                UNIQUE (repo_id, dev)
+            );
+            CREATE INDEX IF NOT EXISTS idx_graph_metrics_repo ON graph_metrics (repo_id, pagerank DESC);
             """
         )
         count = await p.fetchval("SELECT COUNT(*) FROM streaming_repos")
@@ -586,8 +597,51 @@ async def collab_graph(owner: str, name: str, min_weight: int = 1):
             }
         )
 
+    # Fetch pre-computed graph metrics (PageRank & degree centrality)
+    metric_rows = await p.fetch(
+        "SELECT dev, pagerank, degree_centrality FROM graph_metrics WHERE repo_id = $1",
+        repo["id"],
+    )
+    metrics_map = {
+        r["dev"]: {"pagerank": float(r["pagerank"]), "degree": int(r["degree_centrality"])}
+        for r in metric_rows
+    }
+
+    # If graph_metrics is not populated for this repo, compute on the fly so PageRank is always available
+    if not metrics_map and nodes:
+        adj: dict[str, set[str]] = defaultdict(set)
+        for e in edges:
+            adj[e["source"]].add(e["target"])
+            adj[e["target"]].add(e["source"])
+        n_nodes = len(nodes)
+        d_factor = 0.85
+        pr_scores = {u: 1.0 / n_nodes for u in nodes}
+        for _ in range(100):
+            new_pr = {}
+            sink_sum = sum(pr_scores[u] for u in nodes if len(adj[u]) == 0)
+            for u in nodes:
+                inc_sum = sum(pr_scores[v] / len(adj[v]) for v in adj[u] if len(adj[v]) > 0)
+                new_pr[u] = (1.0 - d_factor) / n_nodes + d_factor * (inc_sum + sink_sum / n_nodes)
+            diff = sum(abs(new_pr[u] - pr_scores[u]) for u in nodes)
+            pr_scores = new_pr
+            if diff < 1e-4:
+                break
+        metrics_map = {
+            u: {"pagerank": pr_scores.get(u, 1.0 / n_nodes), "degree": len(adj[u])}
+            for u in nodes
+        }
+
+    nodes_list = []
+    for n in sorted(list(nodes)):
+        m = metrics_map.get(n, {})
+        nodes_list.append({
+            "id": n,
+            "pagerank": round(m.get("pagerank", 1.0 / max(len(nodes), 1)), 5),
+            "degree": m.get("degree", 1),
+        })
+
     return {
-        "nodes": [{"id": n} for n in sorted(list(nodes))],
+        "nodes": nodes_list,
         "edges": edges,
     }
 

@@ -52,6 +52,7 @@ export interface RepoOverview {
 export interface GraphNode {
   id: string
   degree?: number
+  pagerank?: number
   commits?: number
   x?: number
   y?: number

@@ -664,6 +664,63 @@ def sync_analytics_to_postgres(
                 top_edges,
             )
 
+            # Ensure graph_metrics table exists
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS graph_metrics (
+                    id                 SERIAL PRIMARY KEY,
+                    repo_id            INT REFERENCES repositories(id) ON DELETE CASCADE,
+                    dev                TEXT NOT NULL,
+                    pagerank           FLOAT DEFAULT 0.0,
+                    degree_centrality  INT DEFAULT 0,
+                    computed_at        TIMESTAMPTZ DEFAULT NOW(),
+                    UNIQUE (repo_id, dev)
+                );
+                CREATE INDEX IF NOT EXISTS idx_graph_metrics_repo ON graph_metrics (repo_id, pagerank DESC);
+                """
+            )
+
+            # Compute PageRank (d=0.85, tol=1e-4) and degree centrality on collaboration topology
+            adj_graph: dict[str, set[str]] = defaultdict(set)
+            all_devs: set[str] = set()
+            for _, da, db, _, _, _ in top_edges:
+                adj_graph[da].add(db)
+                adj_graph[db].add(da)
+                all_devs.add(da)
+                all_devs.add(db)
+
+            num_devs = len(all_devs)
+            if num_devs > 0:
+                d_factor = 0.85
+                pr_scores = {u: 1.0 / num_devs for u in all_devs}
+                for _ in range(100):
+                    new_pr = {}
+                    sink_sum = sum(pr_scores[u] for u in all_devs if len(adj_graph[u]) == 0)
+                    for u in all_devs:
+                        inc_sum = sum(pr_scores[v] / len(adj_graph[v]) for v in adj_graph[u] if len(adj_graph[v]) > 0)
+                        new_pr[u] = (1.0 - d_factor) / num_devs + d_factor * (inc_sum + sink_sum / num_devs)
+                    diff = sum(abs(new_pr[u] - pr_scores[u]) for u in all_devs)
+                    pr_scores = new_pr
+                    if diff < 1e-4:
+                        break
+
+                metric_records = [
+                    (repo_id, dev, float(pr_scores[dev]), len(adj_graph[dev]))
+                    for dev in all_devs
+                ]
+                execute_values(
+                    cur,
+                    """
+                    INSERT INTO graph_metrics (repo_id, dev, pagerank, degree_centrality)
+                    VALUES %s
+                    ON CONFLICT (repo_id, dev) DO UPDATE
+                    SET pagerank = EXCLUDED.pagerank,
+                        degree_centrality = EXCLUDED.degree_centrality,
+                        computed_at = NOW();
+                    """,
+                    metric_records,
+                )
+
         conn.commit()
 
     except Exception as exc:

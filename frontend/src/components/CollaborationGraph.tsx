@@ -19,7 +19,7 @@ export const CollaborationGraph: React.FC<CollaborationGraphProps> = ({
   const svgRef = useRef<SVGSVGElement | null>(null)
   const containerRef = useRef<HTMLDivElement | null>(null)
   const [searchTerm, setSearchTerm] = useState('')
-  const [hoveredNode, setHoveredNode] = useState<{ id: string; degree: number; x: number; y: number } | null>(null)
+  const [hoveredNode, setHoveredNode] = useState<{ id: string; degree: number; pagerank?: number; x: number; y: number } | null>(null)
 
   useEffect(() => {
     if (!svgRef.current || !containerRef.current || !data || data.nodes.length === 0) return
@@ -42,7 +42,8 @@ export const CollaborationGraph: React.FC<CollaborationGraphProps> = ({
     // Clone data for D3 mutation
     const nodes: GraphNode[] = data.nodes.map((n) => ({
       id: n.id,
-      degree: degreeMap.get(n.id) || 1,
+      degree: n.degree ?? degreeMap.get(n.id) ?? 1,
+      pagerank: n.pagerank,
     }))
 
     const edges: any[] = data.edges.map((e) => ({
@@ -93,12 +94,19 @@ export const CollaborationGraph: React.FC<CollaborationGraphProps> = ({
       .selectAll('circle')
       .data(nodes)
       .join('circle')
-      .attr('r', (d: any) => Math.min(18, Math.max(5, Math.sqrt(d.degree || 1) * 2.5 + 4)))
+      .attr('r', (d: any) => {
+        if (d.pagerank && d.pagerank > 0) {
+          const relativePR = d.pagerank * (nodes.length || 1)
+          return Math.min(22, Math.max(5, Math.sqrt(relativePR) * 4.5 + 3.5))
+        }
+        return Math.min(18, Math.max(5, Math.sqrt(d.degree || 1) * 2.5 + 4))
+      })
       .attr('fill', (d: any) => {
+        const relativePR = d.pagerank ? d.pagerank * (nodes.length || 1) : 1
         const deg = d.degree || 1
-        if (deg > 15) return '#f4f4f5' // Core Maintainer (bright crisp white)
-        if (deg > 6) return '#a1a1aa'  // Active regular (zinc-400)
-        return '#3f3f46'              // Casual (zinc-700)
+        if (relativePR > 2.2 || deg > 15) return '#f4f4f5' // Foundational Maintainer (bright crisp white)
+        if (relativePR > 1.1 || deg > 6) return '#a1a1aa'  // Active collaborator (zinc-400)
+        return '#3f3f46'                                  // Contributor (zinc-700)
       })
       .attr('stroke', '#18181b')
       .attr('stroke-width', 2)
@@ -123,7 +131,7 @@ export const CollaborationGraph: React.FC<CollaborationGraphProps> = ({
       )
       .on('mouseenter', (event, d: any) => {
         const [x, y] = d3.pointer(event, containerRef.current)
-        setHoveredNode({ id: d.id, degree: d.degree || 1, x, y })
+        setHoveredNode({ id: d.id, degree: d.degree || 1, pagerank: d.pagerank, x, y })
         if (event.currentTarget) {
           d3.select(event.currentTarget as SVGCircleElement)
             .attr('stroke', '#ffffff')
@@ -189,7 +197,7 @@ export const CollaborationGraph: React.FC<CollaborationGraphProps> = ({
             Developer Collaboration Network
           </div>
           <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-            Co-authorship topology extracted from multi-author file commits.
+            Co-authorship topology extracted from multi-author file commits, sized by GraphX PageRank influence.
           </div>
         </div>
 
@@ -258,17 +266,22 @@ export const CollaborationGraph: React.FC<CollaborationGraphProps> = ({
               background: '#18181b',
               border: '1px solid var(--border-primary)',
               borderRadius: 'var(--radius-xs)',
-              padding: '6px 10px',
+              padding: '8px 12px',
               fontSize: '0.775rem',
               pointerEvents: 'none',
               zIndex: 20,
-              boxShadow: '0 4px 12px rgba(0,0,0,0.5)',
+              boxShadow: '0 4px 16px rgba(0,0,0,0.6)',
             }}
           >
             <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{hoveredNode.id}</div>
-            <div style={{ color: 'var(--text-dim)', fontSize: '0.7rem' }}>
+            <div style={{ color: 'var(--text-dim)', fontSize: '0.7rem', marginTop: '2px' }}>
               Connected to {hoveredNode.degree} collaborator(s)
             </div>
+            {hoveredNode.pagerank !== undefined && hoveredNode.pagerank > 0 && (
+              <div style={{ color: '#38bdf8', fontSize: '0.725rem', marginTop: '4px', fontFamily: 'var(--font-mono)' }}>
+                PageRank: {hoveredNode.pagerank.toFixed(5)}
+              </div>
+            )}
           </div>
         )}
 
@@ -291,11 +304,11 @@ export const CollaborationGraph: React.FC<CollaborationGraphProps> = ({
         >
           <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
             <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#f4f4f5' }} />
-            <span>Core Maintainer</span>
+            <span>High PageRank (Core)</span>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
             <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#a1a1aa' }} />
-            <span>Regular</span>
+            <span>Active Contributor</span>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
             <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#3f3f46' }} />

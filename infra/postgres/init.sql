@@ -104,6 +104,21 @@ CREATE TABLE IF NOT EXISTS collaboration_edges (
 );
 
 -- ──────────────────────────────────────────────────────────
+-- Graph metrics: PageRank & degree centrality per developer
+-- ──────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS graph_metrics (
+    id                 SERIAL PRIMARY KEY,
+    repo_id            INT REFERENCES repositories(id) ON DELETE CASCADE,
+    dev                TEXT NOT NULL,
+    pagerank           FLOAT DEFAULT 0.0,
+    degree_centrality  INT DEFAULT 0,
+    computed_at        TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (repo_id, dev)
+);
+
+CREATE INDEX IF NOT EXISTS idx_graph_metrics_repo ON graph_metrics (repo_id, pagerank DESC);
+
+-- ──────────────────────────────────────────────────────────
 -- Project health scores (computed by the analytics pipeline)
 -- ──────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS health_scores (

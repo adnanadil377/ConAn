@@ -278,7 +278,7 @@ Apache Spark is a unified distributed data analytics engine featuring:
 
 #### Project Role & Concrete Value
 1. **Batch ETL (`analytics.CommitETL`)**: Reads all raw Parquet files from HDFS, extracts repository names from partition paths, executes regex-based commit taxonomy classification, deduplicates commits by `(repository, hash)`, computes monthly contributor rollups, and writes ACID snapshots to Iceberg.
-2. **Graph Analytics (`analytics.GraphAnalytics`)**: Maps developer emails to 64-bit integer vertex IDs, constructs co-authorship collaboration edges (developers touching the same repository module in the same month), runs distributed **PageRank** ($d=0.85$, tolerance $\epsilon=0.0001$) to find core maintainers, computes degree centrality, and calculates module-level bus factors.
+2. **Graph Analytics (`analytics.GraphAnalytics`)**: Maps developer emails to 64-bit integer vertex IDs, constructs co-authorship collaboration edges (developers touching the same repository in the same calendar month with $\ge 2$ shared periods), runs distributed **PageRank** ($d=0.85$, tolerance $\epsilon=0.0001$) to find core maintainers, computes degree centrality, and calculates module-level bus factors. The serving layer complements this by computing fine-grained file/module-level co-editing topology and PageRank scores persisted in PostgreSQL for sub-25ms interactive D3 force-directed visualization.
 
 ---
 
